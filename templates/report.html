@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}Audit Report — {{ audit.contractor_name }}{% endblock %}
+
+{% block head %}
+<style>
+    .report-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 24px;
+        margin-bottom: 20px;
+        padding-bottom: 20px;
+        border-bottom: 1px solid var(--border);
+    }
+    .meta-item { display: flex; flex-direction: column; gap: 2px; }
+    .meta-label { font-size: 11px; font-weight: 600; text-transform: uppercase;
+                  letter-spacing: 0.4px; color: var(--muted); }
+    .meta-value { font-size: 14px; font-weight: 500; color: var(--text); }
+    .report-frame {
+        width: 100%;
+        height: calc(100vh - 240px);
+        min-height: 600px;
+        border: none;
+        border-radius: 8px;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+
+<!-- Back + actions bar -->
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
+    <a href="/" class="btn btn-secondary">&#8592; Back to Dashboard</a>
+    <div style="display:flex;gap:8px;">
+        <a href="/report/{{ audit_id }}/pdf" class="btn btn-secondary">
+            &#8595; Download PDF
+        </a>
+        <a href="/report/{{ audit_id }}/raw" target="_blank" class="btn btn-secondary">
+            &#8599; Open Full Report
+        </a>
+    </div>
+</div>
+
+<!-- Audit metadata card -->
+<div class="card" style="margin-bottom: 20px;">
+    <div class="report-meta">
+        <div class="meta-item">
+            <span class="meta-label">Contractor</span>
+            <span class="meta-value">{{ audit.contractor_name }}</span>
+        </div>
+        <div class="meta-item">
+            <span class="meta-label">Contract #</span>
+            <span class="meta-value" style="font-family:monospace;">{{ audit.contract_number or '—' }}</span>
+        </div>
+        <div class="meta-item">
+            <span class="meta-label">Week Ending</span>
+            <span class="meta-value">{{ audit.week_ending or '—' }}</span>
+        </div>
+        <div class="meta-item">
+            <span class="meta-label">Payroll #</span>
+            <span class="meta-value">{{ audit.payroll_number or '—' }}</span>
+        </div>
+        <div class="meta-item">
+            <span class="meta-label">Workers</span>
+            <span class="meta-value">{{ audit.worker_count }}</span>
+        </div>
+        <div class="meta-item">
+            <span class="meta-label">Violations</span>
+            <span class="meta-value" style="color:{% if audit.violation_count > 0 %}var(--red){% else %}var(--green){% endif %};">
+                {{ audit.violation_count }}
+            </span>
+        </div>
+        <div class="meta-item">
+            <span class="meta-label">Warnings</span>
+            <span class="meta-value" style="color:{% if audit.warning_count > 0 %}var(--yellow){% else %}var(--text){% endif %};">
+                {{ audit.warning_count }}
+            </span>
+        </div>
+        <div class="meta-item">
+            <span class="meta-label">Status</span>
+            <span class="meta-value">
+                {% if audit.overall_status == 'PASS' %}
+                    <span class="badge badge-pass">PASS</span>
+                {% else %}
+                    <span class="badge badge-fail">FAIL</span>
+                {% endif %}
+            </span>
+        </div>
+        <div class="meta-item">
+            <span class="meta-label">Submitted</span>
+            <span class="meta-value">{{ audit.submitted_at }} by {{ audit.submitted_by }}</span>
+        </div>
+        {% if audit.fringe_cash or audit.fringe_plan %}
+        <div class="meta-item">
+            <span class="meta-label">Fringe (Manual)</span>
+            <span class="meta-value" style="font-size:13px;">
+                {% if audit.fringe_cash %} Cash ${{ "%.2f"|format(audit.fringe_cash) }}/hr {% endif %}
+                {% if audit.fringe_plan %} | {{ audit.fringe_plan }} {% endif %}
+                {% if audit.fringe_plan_amt %} ${{ "%.2f"|format(audit.fringe_plan_amt) }}/hr {% endif %}
+            </span>
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- Embedded report -->
+    <iframe class="report-frame"
+            src="/report/{{ audit_id }}/raw"
+            title="Audit Report for {{ audit.contractor_name }}">
+    </iframe>
+</div>
+
+{% endblock %}

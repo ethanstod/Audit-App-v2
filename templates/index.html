@@ -1,0 +1,236 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — WH-347 Audit Engine{% endblock %}
+
+{% block content %}
+
+<!-- Stats row -->
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-label">Total Audits</div>
+        <div class="stat-value">{{ total }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Passed</div>
+        <div class="stat-value green">{{ total_pass }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Failed</div>
+        <div class="stat-value red">{{ total_fail }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Wage Determination</div>
+        <div style="font-size:15px;font-weight:700;margin-top:4px;">CA2024-0234</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px;">Highway / Stanislaus County</div>
+    </div>
+</div>
+
+<!-- Upload form -->
+<div class="card" style="margin-bottom: 24px;">
+    <div class="section-header">
+        <div>
+            <div class="section-title">Upload Certified Payroll Report</div>
+            <div class="section-subtitle">Submit a WH-347 PDF to run a full Davis-Bacon compliance audit</div>
+        </div>
+    </div>
+
+    <form id="upload-form" method="POST" action="/upload" enctype="multipart/form-data">
+
+        <!-- Drop zone -->
+        <div class="form-group full" style="margin-bottom: 20px;">
+            <div class="drop-zone" id="drop-zone" onclick="document.getElementById('pdf-input').click()">
+                <div class="drop-zone-icon">&#128196;</div>
+                <p><strong>Click to select</strong> or drag and drop a WH-347 PDF</p>
+                <p>PDF files only</p>
+                <div class="selected-file" id="file-name"></div>
+            </div>
+            <input type="file" id="pdf-input" name="pdf" accept=".pdf"
+                   style="display:none" required>
+        </div>
+
+        <hr class="divider">
+
+        <div style="margin-bottom: 16px;">
+            <div class="section-title" style="font-size:14px;">Fringe Benefit Details</div>
+            <p style="font-size:12px;color:var(--muted);margin-top:4px;">
+                Enter the contractor's fringe benefit payment method. Leave blank if fringe is already included in the PDF.
+            </p>
+        </div>
+
+        <div class="form-grid" style="margin-bottom: 20px;">
+            <div class="form-group">
+                <label>Fringe — Cash in Lieu ($/hr)</label>
+                <input type="number" name="fringe_cash" step="0.01" min="0"
+                       placeholder="0.00">
+                <span class="form-hint">Hourly cash paid to worker in lieu of benefits</span>
+            </div>
+            <div class="form-group">
+                <label>Fringe — Plan Name</label>
+                <input type="text" name="fringe_plan_name"
+                       placeholder="e.g. LIUNA Pension Fund">
+                <span class="form-hint">Name of bona fide benefit plan (29 CFR 5.5(a)(1)(ii))</span>
+            </div>
+            <div class="form-group">
+                <label>Fringe — Plan Amount ($/hr)</label>
+                <input type="number" name="fringe_plan_amount" step="0.01" min="0"
+                       placeholder="0.00">
+                <span class="form-hint">Hourly equivalent of plan contributions</span>
+            </div>
+            <div class="form-group">
+                <label>Submitted By</label>
+                <input type="text" name="submitted_by" placeholder="Your name">
+                <span class="form-hint">Team member uploading this CPR</span>
+            </div>
+        </div>
+
+        <button type="submit" class="btn btn-primary" id="submit-btn">
+            &#9654; Run Audit
+        </button>
+        <span id="loading-msg" style="display:none;margin-left:14px;font-size:13px;color:var(--muted);">
+            Processing... this may take a few seconds.
+        </span>
+    </form>
+</div>
+
+<!-- Audit table -->
+<div class="card">
+    <div class="section-header">
+        <div>
+            <div class="section-title">Audit History</div>
+            <div class="section-subtitle">All submitted certified payroll reports</div>
+        </div>
+    </div>
+
+    {% if audits %}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Submitted</th>
+                    <th>Contractor</th>
+                    <th>Contract #</th>
+                    <th>Week Ending</th>
+                    <th>Payroll #</th>
+                    <th>Workers</th>
+                    <th>Violations</th>
+                    <th>Warnings</th>
+                    <th>Fringe</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for a in audits %}
+                <tr>
+                    <td style="white-space:nowrap;">
+                        <div style="font-weight:500;">{{ a.submitted_at }}</div>
+                        <div style="font-size:11px;color:var(--muted);">{{ a.submitted_by }}</div>
+                    </td>
+                    <td style="font-weight:500;max-width:180px;">{{ a.contractor_name }}</td>
+                    <td style="font-family:monospace;font-size:12px;">{{ a.contract_number or '—' }}</td>
+                    <td style="white-space:nowrap;">{{ a.week_ending or '—' }}</td>
+                    <td>{{ a.payroll_number or '—' }}</td>
+                    <td>{{ a.worker_count }}</td>
+                    <td>
+                        {% if a.violation_count > 0 %}
+                            <span style="color:var(--red);font-weight:600;">{{ a.violation_count }}</span>
+                        {% else %}
+                            <span style="color:var(--green);">0</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if a.warning_count > 0 %}
+                            <span style="color:var(--yellow);font-weight:600;">{{ a.warning_count }}</span>
+                        {% else %}
+                            0
+                        {% endif %}
+                    </td>
+                    <td style="font-size:12px;color:var(--muted);">
+                        {% if a.fringe_cash > 0 %}
+                            Cash ${{ "%.2f"|format(a.fringe_cash) }}/hr<br>
+                        {% endif %}
+                        {% if a.fringe_plan %}
+                            {{ a.fringe_plan }}
+                            {% if a.fringe_plan_amt > 0 %}
+                                (${{ "%.2f"|format(a.fringe_plan_amt) }}/hr)
+                            {% endif %}
+                        {% endif %}
+                        {% if not a.fringe_cash and not a.fringe_plan %}
+                            <span style="color:var(--muted);">From PDF</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if a.overall_status == 'PASS' %}
+                            <span class="badge badge-pass">PASS</span>
+                        {% else %}
+                            <span class="badge badge-fail">FAIL</span>
+                        {% endif %}
+                    </td>
+                    <td style="white-space:nowrap;">
+                        <a href="/report/{{ a.id }}" class="btn btn-secondary btn-sm">View</a>
+                        <a href="/report/{{ a.id }}/pdf" class="btn btn-secondary btn-sm">PDF</a>
+                        <form method="POST" action="/delete/{{ a.id }}" style="display:inline;"
+                              onsubmit="return confirm('Delete this audit?')">
+                            <button type="submit" class="btn btn-danger btn-sm">Delete</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="empty-state">
+        <div style="font-size:40px;margin-bottom:12px;">&#128196;</div>
+        <strong>No audits yet</strong>
+        <p>Upload a WH-347 PDF above to run your first compliance audit.</p>
+    </div>
+    {% endif %}
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Drag and drop
+    const dropZone  = document.getElementById('drop-zone');
+    const fileInput = document.getElementById('pdf-input');
+    const fileName  = document.getElementById('file-name');
+    const form      = document.getElementById('upload-form');
+    const submitBtn = document.getElementById('submit-btn');
+    const loadingMsg= document.getElementById('loading-msg');
+
+    fileInput.addEventListener('change', () => {
+        if (fileInput.files[0]) {
+            fileName.textContent = fileInput.files[0].name;
+        }
+    });
+
+    dropZone.addEventListener('dragover', e => {
+        e.preventDefault();
+        dropZone.classList.add('dragover');
+    });
+    dropZone.addEventListener('dragleave', () => {
+        dropZone.classList.remove('dragover');
+    });
+    dropZone.addEventListener('drop', e => {
+        e.preventDefault();
+        dropZone.classList.remove('dragover');
+        const file = e.dataTransfer.files[0];
+        if (file && file.name.toLowerCase().endsWith('.pdf')) {
+            const dt = new DataTransfer();
+            dt.items.add(file);
+            fileInput.files = dt.files;
+            fileName.textContent = file.name;
+        } else {
+            alert('Please drop a PDF file.');
+        }
+    });
+
+    // Show loading state on submit
+    form.addEventListener('submit', () => {
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Running Audit...';
+        loadingMsg.style.display = 'inline';
+    });
+</script>
+{% endblock %}
