@@ -1,5 +1,6 @@
 import os
 import argparse
+# git push test - Claude Code integration check
 
 from pdf_parser import extract_wh347_data
 from math_audit import audit_wh347_math
