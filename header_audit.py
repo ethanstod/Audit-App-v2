@@ -9,11 +9,12 @@ from datetime import datetime
 
 
 REQUIRED_FIELDS = [
-    ("contractor_name",  "Contractor Name",       "29 CFR 5.5(a)(3)(ii)(A)"),
-    ("contract_number",  "Contract Number",        "29 CFR 5.5(a)(3)(ii)(A)"),
-    ("payroll_number",   "Payroll Number",         "29 CFR 5.5(a)(3)(ii)(A)"),
-    ("week_ending",      "Week Ending Date",       "29 CFR 5.5(a)(3)(ii)(A)"),
-    ("project_name",     "Project Name/Location",  "29 CFR 5.5(a)(3)(ii)(A)"),
+    ("contractor_name",           "Contractor Name",              "29 CFR 5.5(a)(3)(ii)(A)"),
+    ("contract_number",           "Contract Number",              "29 CFR 5.5(a)(3)(ii)(A)"),
+    ("payroll_number",            "Payroll Number",               "29 CFR 5.5(a)(3)(ii)(A)"),
+    ("week_ending",               "Week Ending Date",             "29 CFR 5.5(a)(3)(ii)(A)"),
+    ("project_name",              "Project Name/Location",        "29 CFR 5.5(a)(3)(ii)(A)"),
+    ("wage_determination_number", "Wage Determination Number",    "29 CFR 5.5(a)(3)(ii)(A)"),
 ]
 
 

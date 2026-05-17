@@ -10,6 +10,35 @@ TOLERANCE = 0.02
 
 
 # ---------------------------------------------------------------------------
+# LCPtracker / DOL classification normalizer
+# ---------------------------------------------------------------------------
+
+# Parenthetical qualifiers that appear in LCPtracker exports but not in wage
+# determination tables: (GROUP 1), (ZONE 1-3), (JOURNEY LEVEL), etc.
+_PAREN_PATTERN   = re.compile(r'\s*\([^)]*\)')
+# Trailing standalone qualifiers
+_TRAILING_PATTERN = re.compile(
+    r'\s+(JOURNEYMAN|JOURNEY\s*LEVEL|ZONE\s*[\d\-]+|GROUP\s*\d+|BASIC|'
+    r'FOREMAN|GENERAL\s*FOREMAN|LEADMAN|TRAFFIC\s*CONTROL)$'
+)
+
+
+def _normalize_classification(cls: str) -> str:
+    """
+    Strip LCPtracker / DOL suffixes before wage-table matching.
+    Examples:
+      "LABORER (GROUP 1)"              → "LABORER"
+      "CARPENTER (JOURNEY LEVEL)"      → "CARPENTER"
+      "ELECTRICIAN - INSIDE WIREMAN"   → "ELECTRICIAN - INSIDE WIREMAN"  (kept as-is)
+      "IRONWORKER - REINFORCING FOREMAN" → "IRONWORKER - REINFORCING"
+    """
+    normalized = str(cls).upper().strip()
+    normalized = _PAREN_PATTERN.sub('', normalized)
+    normalized = _TRAILING_PATTERN.sub('', normalized)
+    return normalized.strip()
+
+
+# ---------------------------------------------------------------------------
 # Fringe cell parser
 # ---------------------------------------------------------------------------
 
@@ -123,28 +152,53 @@ def load_wage_table(path):
 
 def find_wage_row(classification, wage_table):
     """
-    Fuzzy-matches a worker's classification against the wage table.
-    Returns the matching row as a dict, or None.
+    Matches a worker's classification against the wage table.
+
+    Match order:
+      1. Exact match on raw classification (uppercased)
+      2. Exact match after stripping LCPtracker qualifiers
+      3. Fuzzy match on normalized string (cutoff 0.75)
+      4. Fuzzy match on raw string (cutoff 0.75)
+
+    Returns the matching row as a dict with optional _fuzzy_match key, or None.
     """
     if wage_table.empty:
         return None
 
     wage_classes = wage_table["CLASSIFICATION"].tolist()
-    classification_upper = str(classification).upper().strip()
+    raw_upper = str(classification).upper().strip()
+    normalized = _normalize_classification(classification)
 
-    # Exact match first
-    exact = wage_table[wage_table["CLASSIFICATION"] == classification_upper]
+    # 1. Exact on raw
+    exact = wage_table[wage_table["CLASSIFICATION"] == raw_upper]
     if not exact.empty:
         return exact.iloc[0].to_dict()
 
-    # Fuzzy match
-    matches = get_close_matches(classification_upper, wage_classes, n=1, cutoff=0.75)
-    if not matches:
-        return None
+    # 2. Exact on normalized
+    if normalized != raw_upper:
+        exact_norm = wage_table[wage_table["CLASSIFICATION"] == normalized]
+        if not exact_norm.empty:
+            row = exact_norm.iloc[0].to_dict()
+            if normalized != raw_upper:
+                row["_fuzzy_match"] = normalized
+            return row
 
-    row = wage_table[wage_table["CLASSIFICATION"] == matches[0]].iloc[0].to_dict()
-    row["_fuzzy_match"] = matches[0]
-    return row
+    # 3. Fuzzy on normalized
+    matches = get_close_matches(normalized, wage_classes, n=1, cutoff=0.75)
+    if matches:
+        row = wage_table[wage_table["CLASSIFICATION"] == matches[0]].iloc[0].to_dict()
+        row["_fuzzy_match"] = matches[0]
+        return row
+
+    # 4. Fuzzy on raw (catches cases where normalization hurt the match)
+    if normalized != raw_upper:
+        matches_raw = get_close_matches(raw_upper, wage_classes, n=1, cutoff=0.75)
+        if matches_raw:
+            row = wage_table[wage_table["CLASSIFICATION"] == matches_raw[0]].iloc[0].to_dict()
+            row["_fuzzy_match"] = matches_raw[0]
+            return row
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +226,14 @@ def audit_all_workers(parsed_data, wage_table):
 
     for worker in workers:
         row = worker.get("row_number")
+        j_ra = worker.get("j_ra", "").upper()
+
+        # Apprentice rates are audited by audit_apprentice_rates; skip here to
+        # avoid comparing apprentice pay against the journeyman rate (which would
+        # always produce a false violation).
+        if j_ra == "RA":
+            continue
+
         classification = worker.get("classification", "")
         st_rate = float(worker.get("st_rate", worker.get("rate", 0)))
         fringe_cash = float(worker.get("fringe_paid_cash", 0))
@@ -187,6 +249,8 @@ def audit_all_workers(parsed_data, wage_table):
                 "reason": f"No wage table match for classification '{classification}'",
                 "regulation": "29 CFR 5.5(a)(1)(i)",
                 "severity": "WARNING",
+                "required_base_rate": None,
+                "required_fringe": None,
             }
             results["checks"].append({
                 "row": row,
@@ -197,8 +261,8 @@ def audit_all_workers(parsed_data, wage_table):
             continue
 
         required_base = float(wage_row["BASE_RATE"])
-        fuzzy_note = f" (matched to '{wage_row.get('_fuzzy_match', classification)}')" \
-                     if "_fuzzy_match" in wage_row else ""
+        fuzzy_note = (f" (matched to '{wage_row['_fuzzy_match']}')"
+                      if "_fuzzy_match" in wage_row else "")
         issues = []
 
         # Check base rate
@@ -207,11 +271,11 @@ def audit_all_workers(parsed_data, wage_table):
                 f"Base rate ${st_rate:.2f} < required ${required_base:.2f}{fuzzy_note}"
             )
 
-        # Check total compensation
+        # Check total compensation (base + fringe combined)
         fringe_flat = float(wage_row.get("FRINGE_FLAT", 0))
-        fringe_pct = float(wage_row.get("FRINGE_PCT", 0))
+        fringe_pct  = float(wage_row.get("FRINGE_PCT", 0))
         required_fringe = round(fringe_flat + (required_base * fringe_pct), 2)
-        required_total = round(required_base + required_fringe, 2)
+        required_total  = round(required_base + required_fringe, 2)
 
         if required_fringe > 0 and reported_total < required_total - TOLERANCE:
             issues.append(
@@ -227,6 +291,8 @@ def audit_all_workers(parsed_data, wage_table):
                 "reason": " | ".join(issues),
                 "regulation": "29 CFR 5.5(a)(1)(i); Davis-Bacon Act Sec. 1",
                 "severity": "VIOLATION",
+                "required_base_rate": required_base,
+                "required_fringe": required_fringe,
             }
         else:
             results["by_row"][row] = {
@@ -234,6 +300,8 @@ def audit_all_workers(parsed_data, wage_table):
                 "reason": fuzzy_note.strip(" ()") if fuzzy_note else "",
                 "regulation": "29 CFR 5.5(a)(1)(i)",
                 "severity": "",
+                "required_base_rate": required_base,
+                "required_fringe": required_fringe,
             }
 
         results["checks"].append({
@@ -293,7 +361,7 @@ def audit_apprentice_rates(parsed_data, wage_table):
 
         classification = worker.get("classification", "")
         st_rate = float(worker.get("st_rate", worker.get("rate", 0)))
-        period = int(worker.get("apprentice_period", 1) or 1)
+        period = int(worker.get("apprentice_period", 0) or 0)
         issues = []
 
         wage_row = find_wage_row(classification, wage_table)
@@ -315,7 +383,26 @@ def audit_apprentice_rates(parsed_data, wage_table):
 
         journeyman_rate = float(wage_row["BASE_RATE"])
 
-        # Check apprentice rate for their period
+        # When no period is recorded (cert not uploaded), try to infer from the
+        # reported rate by checking which period's expected rate it matches.
+        cert_needed = False
+        if period == 0:
+            cert_needed = True
+            inferred = None
+            for p in range(1, 5):
+                pct_val = wage_row.get(f"APPRENTICE_PERIOD_{p}_PCT")
+                if pct_val is None:
+                    continue
+                try:
+                    expected = round(journeyman_rate * float(pct_val), 2)
+                    if abs(st_rate - expected) <= TOLERANCE:
+                        inferred = p
+                        break
+                except (ValueError, TypeError):
+                    continue
+            period = inferred if inferred is not None else 1
+
+        # Check rate against the determined period
         pct_col = f"APPRENTICE_PERIOD_{period}_PCT"
         apprentice_pct = wage_row.get(pct_col)
 
@@ -326,31 +413,60 @@ def audit_apprentice_rates(parsed_data, wage_table):
                 if st_rate < required_rate - TOLERANCE:
                     issues.append(
                         f"Apprentice rate ${st_rate:.2f} < required ${required_rate:.2f} "
-                        f"({int(apprentice_pct * 100)}% of journeyman ${journeyman_rate:.2f})"
+                        f"({int(apprentice_pct * 100)}% of journeyman ${journeyman_rate:.2f}) "
+                        f"for period {period}"
                     )
             except (ValueError, TypeError):
                 pass
 
-        if issues:
+        if cert_needed:
+            # Always flag when no apprenticeship cert has been uploaded — the
+            # period and program must be verified against the registered cert.
+            issues_for_cert = [{
+                "text": (
+                    f"No apprentice registration certificate on file for this worker. "
+                    f"Period inferred as {period} from rate ${st_rate:.2f}. "
+                    f"Upload cert to confirm period, program, and ratio eligibility."
+                ),
+                "severity": "WARNING",
+                "regulation": "29 CFR 5.5(a)(4); 29 CFR 5.5(a)(4)(i)",
+            }]
+            # Merge cert warning into result (won't override a FAIL)
+            if not issues:
+                issues = issues_for_cert
+            else:
+                issues.extend(issues_for_cert)
+
+        # issues may contain strings (rate violations) or dicts (cert warnings)
+        def _issue_text(i):
+            return i["text"] if isinstance(i, dict) else i
+
+        def _issue_severity(i):
+            return i.get("severity", "VIOLATION") if isinstance(i, dict) else "VIOLATION"
+
+        violations = [i for i in issues if _issue_severity(i) == "VIOLATION"]
+        warnings   = [i for i in issues if _issue_severity(i) == "WARNING"]
+
+        if violations:
+            row_result = "FAIL"
             results["passed"] = False
-            results["by_row"][row] = {
-                "result": "FAIL",
-                "reason": " | ".join(issues),
-                "regulation": "29 CFR 5.5(a)(4)",
-                "severity": "VIOLATION",
-            }
+        elif warnings:
+            row_result = "WARN"
         else:
-            results["by_row"][row] = {
-                "result": "PASS",
-                "reason": "",
-                "regulation": "29 CFR 5.5(a)(4)",
-                "severity": "",
-            }
+            row_result = "PASS"
+
+        reason_text = " | ".join(_issue_text(i) for i in issues)
+        results["by_row"][row] = {
+            "result":     row_result,
+            "reason":     reason_text,
+            "regulation": "29 CFR 5.5(a)(4)",
+            "severity":   "VIOLATION" if violations else ("WARNING" if warnings else ""),
+        }
 
         results["checks"].append({
-            "row": row,
-            "result": results["by_row"][row]["result"],
-            "details": results["by_row"][row]["reason"] or "OK",
+            "row":        row,
+            "result":     row_result,
+            "details":    reason_text or "OK",
             "regulation": "29 CFR 5.5(a)(4)",
         })
 

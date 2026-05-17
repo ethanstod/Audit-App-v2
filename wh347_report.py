@@ -56,6 +56,8 @@ def _combine_row_status(row_number, audit_results_list):
     combined = "PASS"
     reasons = []
     regulations = []
+    required_base_rate = None
+    required_fringe = None
 
     for audit in audit_results_list:
         by_row = audit.get("by_row", {})
@@ -71,8 +73,15 @@ def _combine_row_status(row_number, audit_results_list):
             reasons.append(f"[{audit.get('audit_name', '?').upper()}] {entry['reason']}")
         if entry.get("regulation"):
             regulations.append(entry["regulation"])
+        # Pull required rates from the pay audit entry
+        if audit.get("audit_name") == "pay":
+            if entry.get("required_base_rate") is not None:
+                required_base_rate = entry["required_base_rate"]
+            if entry.get("required_fringe") is not None:
+                required_fringe = entry["required_fringe"]
 
-    return combined, " | ".join(reasons), "; ".join(set(regulations))
+    return (combined, " | ".join(reasons), "; ".join(set(regulations)),
+            required_base_rate, required_fringe)
 
 
 def _fmt(val, prefix="$"):
@@ -190,7 +199,9 @@ def _section_worker_detail(workers, audit_results_list):
     rows = ""
     for w in workers:
         row_no = w.get("row_number")
-        combined, reasons, regulations = _combine_row_status(row_no, audit_results_list)
+        combined, reasons, regulations, req_base, req_fringe = _combine_row_status(
+            row_no, audit_results_list
+        )
 
         reason_html = ""
         if reasons:
@@ -204,6 +215,20 @@ def _section_worker_detail(workers, audit_results_list):
         j_ra_label = w.get("j_ra", "")
         j_ra_color = "#856404" if j_ra_label == "RA" else "#155724"
 
+        reported_base = float(w.get("st_rate", w.get("rate", 0)))
+        reported_fringe_cash = float(w.get("fringe_paid_cash", 0))
+
+        # Highlight rate cell red when reported < required
+        rate_style = ""
+        fringe_style = ""
+        if req_base is not None and reported_base < req_base - 0.02:
+            rate_style = "background:#f8d7da;font-weight:bold;"
+        if req_fringe is not None and reported_fringe_cash < req_fringe - 0.02:
+            fringe_style = "background:#f8d7da;font-weight:bold;"
+
+        req_base_cell  = f"${req_base:.2f}" if req_base is not None else "—"
+        req_fringe_cell = f"${req_fringe:.2f}" if req_fringe is not None else "—"
+
         rows += f"""
         <tr>
             <td>{row_no}</td>
@@ -214,10 +239,12 @@ def _section_worker_detail(workers, audit_results_list):
             <td>{w.get('ot_hours', 0)}</td>
             <td>{w.get('dt_hours', 0)}</td>
             <td>{w.get('total_hours', 0)}</td>
-            <td>{_fmt(w.get('st_rate', w.get('rate', 0)))}</td>
+            <td style="{rate_style}">{_fmt(reported_base)}</td>
+            <td style="font-size:11px;color:#888">{req_base_cell}</td>
             <td>{_fmt(w.get('ot_rate', 0))}</td>
             <td>{_fmt(w.get('gross', 0))}</td>
-            <td>{_fmt(w.get('fringe_paid_cash', 0))}</td>
+            <td style="{fringe_style}">{_fmt(reported_fringe_cash)}</td>
+            <td style="font-size:11px;color:#888">{req_fringe_cell}</td>
             <td>{_fmt(w.get('deductions', 0))}</td>
             <td>{_fmt(w.get('net', 0))}</td>
             <td>{_badge(combined)}{reason_html}{reg_html}</td>
@@ -226,6 +253,11 @@ def _section_worker_detail(workers, audit_results_list):
     return f"""
     <section>
         <h2>3. Worker Detail</h2>
+        <p style="font-size:12px;color:#666;">
+            <span style="background:#f8d7da;padding:2px 6px;border-radius:3px;">Red cells</span>
+            indicate reported value is below the prevailing wage requirement.
+            &ldquo;Req. Base&rdquo; and &ldquo;Req. Fringe&rdquo; show the wage determination amounts.
+        </p>
         <div style="overflow-x:auto">
         <table>
             <tr>
@@ -238,9 +270,11 @@ def _section_worker_detail(workers, audit_results_list):
                 <th>DT Hrs</th>
                 <th>Total Hrs</th>
                 <th>ST Rate</th>
+                <th>Req. Base</th>
                 <th>OT Rate</th>
                 <th>Gross</th>
                 <th>Fringe Cash</th>
+                <th>Req. Fringe</th>
                 <th>Deductions</th>
                 <th>Net</th>
                 <th>Audit Status</th>

@@ -8,6 +8,7 @@ general Laborer to pay a lower rate) is a primary Davis-Bacon violation.
 """
 
 from difflib import get_close_matches
+from pay_audit import _normalize_classification
 
 FUZZY_CUTOFF = 0.75
 
@@ -61,26 +62,33 @@ def audit_classifications(parsed_data, wage_table):
             })
             continue
 
-        # Exact match
-        exact_matches = [c for c in wage_classes if c == classification]
-        if exact_matches:
+        normalized = _normalize_classification(classification)
+
+        # 1. Exact match on raw classification
+        if classification in wage_classes:
             row_result = "PASS"
             reason = ""
+        # 2. Exact match after stripping LCPtracker qualifiers
+        elif normalized in wage_classes:
+            row_result = "PASS"
+            reason = (f"LCPtracker qualifier stripped: '{classification}' matched as '{normalized}'"
+                      if normalized != classification else "")
         else:
-            # Fuzzy match
-            close = get_close_matches(classification, wage_classes, n=1, cutoff=FUZZY_CUTOFF)
+            # 3. Fuzzy on normalized, then raw
+            close = (get_close_matches(normalized, wage_classes, n=1, cutoff=FUZZY_CUTOFF) or
+                     get_close_matches(classification, wage_classes, n=1, cutoff=FUZZY_CUTOFF))
             if close:
                 fuzzy_match = close[0]
                 row_result = "WARN"
                 reason = (
-                    f"Classification '{classification}' not exact match in wage determination. "
-                    f"Closest match: '{fuzzy_match}' — verify this is the correct classification."
+                    f"Classification '{classification}' not an exact match in the wage "
+                    f"determination. Closest: '{fuzzy_match}' — verify this is correct."
                 )
             else:
                 row_result = "FAIL"
                 reason = (
-                    f"Classification '{classification}' has no match in wage determination. "
-                    f"Worker may be misclassified or using non-standard trade name."
+                    f"Classification '{classification}' has no match in the wage determination. "
+                    f"Worker may be misclassified or using a non-standard trade name."
                 )
                 results["passed"] = False
 

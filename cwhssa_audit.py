@@ -39,13 +39,21 @@ def audit_cwhssa(parsed_data):
 
         # Check 1: OT hours required when total > 40
         if total_hrs > OVERTIME_THRESHOLD and ot_hrs == 0.0:
-            overtime_hours_due = total_hrs - OVERTIME_THRESHOLD
+            overtime_hours_due = round(total_hrs - OVERTIME_THRESHOLD, 2)
+            # Estimate calendar days the violation occurred: assume OT was spread
+            # across the workweek (1 OT hour/day minimum → OT_hrs days affected).
+            # Use the lesser of OT hours and 5 (max workweek days) for the estimate.
+            est_days = min(5, max(1, round(overtime_hours_due)))
             issues.append({
-                "text": f"Worker has {total_hrs:.1f} total hours but no OT hours reported. "
-                        f"~{overtime_hours_due:.1f} hrs should be paid at OT rate.",
+                "text": (
+                    f"Worker has {total_hrs:.1f} total hours but no OT hours reported — "
+                    f"{overtime_hours_due:.1f} hrs should be paid at OT (1.5×) rate. "
+                    f"Est. LD exposure: {est_days} day(s) × ${CWHSSA_LIQUIDATED_DAMAGES_PER_DAY:.0f} "
+                    f"= ${est_days * CWHSSA_LIQUIDATED_DAMAGES_PER_DAY:.0f}."
+                ),
                 "regulation": "40 U.S.C. 3702; 29 CFR 5.8",
                 "severity": "VIOLATION",
-                "liquidated_damages": CWHSSA_LIQUIDATED_DAMAGES_PER_DAY,
+                "liquidated_damages": est_days * CWHSSA_LIQUIDATED_DAMAGES_PER_DAY,
             })
 
         # Check 2: OT rate must be >= 1.5x ST rate
@@ -64,7 +72,8 @@ def audit_cwhssa(parsed_data):
         if violations:
             row_result = "FAIL"
             results["passed"] = False
-            damage_estimate = CWHSSA_LIQUIDATED_DAMAGES_PER_DAY
+            damage_estimate = sum(i.get("liquidated_damages", CWHSSA_LIQUIDATED_DAMAGES_PER_DAY)
+                                  for i in violations)
             results["total_liquidated_damages_estimate"] += damage_estimate
         else:
             row_result = "PASS"
