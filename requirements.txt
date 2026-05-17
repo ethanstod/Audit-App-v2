@@ -1,5 +1,14 @@
+# Existing audit engine
 pdfplumber
+pdfminer.six
 pandas
 openpyxl
 flask
-pdfminer.six
+
+# New FastAPI layer
+fastapi
+uvicorn[standard]
+python-multipart
+
+# Claude / Anthropic SDK
+anthropic
