@@ -12,7 +12,7 @@ import os
 
 import anthropic
 
-MODEL = "claude-sonnet-4-20250514"
+MODEL = "claude-opus-4-7"
 
 _PROMPTS: dict[str, str] = {
     "cpr": """
