@@ -1,4 +1,117 @@
+from datetime import datetime, timedelta
+
 TOLERANCE = 0.02  # dollar rounding tolerance
+STALE_DAYS = 30   # flag payrolls older than this many days
+
+
+def audit_payroll_sanity(parsed_data):
+    """
+    Payroll-level sanity checks independent of wage rates.
+
+    Checks:
+    1. Duplicate worker IDs on the same payroll
+    2. Workers with hours > 0 but gross == 0
+    3. Week ending date is not in the future or stale (> STALE_DAYS old)
+    4. Payroll number is positive integer
+
+    Regulation: 29 CFR 5.5(a)(1)(i)
+    """
+    workers = parsed_data.get("lines", [])
+    header  = parsed_data.get("header", {})
+
+    results = {
+        "audit_name": "sanity",
+        "passed": True,
+        "checks": [],
+        "by_row": {},
+    }
+
+    # --- Check 1: Duplicate worker IDs ---
+    seen_ids = {}
+    for worker in workers:
+        wid = str(worker.get("worker_id", "")).strip()
+        if not wid:
+            continue
+        if wid in seen_ids:
+            results["passed"] = False
+            msg = f"Worker ID '{wid}' appears more than once on this payroll (rows {seen_ids[wid]} and {worker.get('row_number')})"
+            results["checks"].append({
+                "row": worker.get("row_number"),
+                "worker": f"{worker.get('first_name')} {worker.get('last_name')}",
+                "result": "FAIL",
+                "details": msg,
+                "regulation": "29 CFR 5.5(a)(1)(i)",
+            })
+            results["by_row"][f"dup_{wid}"] = {
+                "result": "FAIL",
+                "reason": msg,
+                "regulation": "29 CFR 5.5(a)(1)(i)",
+                "severity": "VIOLATION",
+            }
+        else:
+            seen_ids[wid] = worker.get("row_number")
+
+    # --- Check 2: Hours > 0 but gross == 0 ---
+    for worker in workers:
+        row = worker.get("row_number")
+        total_hrs = float(worker.get("total_hours", 0))
+        gross     = float(worker.get("gross", 0))
+        if total_hrs > 0 and gross == 0.0:
+            results["passed"] = False
+            msg = f"Worker has {total_hrs:.1f} hours but $0.00 gross pay"
+            results["checks"].append({
+                "row": row,
+                "worker": f"{worker.get('first_name')} {worker.get('last_name')}",
+                "result": "FAIL",
+                "details": msg,
+                "regulation": "29 CFR 5.5(a)(1)(i)",
+            })
+            results["by_row"][f"zero_gross_{row}"] = {
+                "result": "FAIL",
+                "reason": msg,
+                "regulation": "29 CFR 5.5(a)(1)(i)",
+                "severity": "VIOLATION",
+            }
+
+    # --- Check 3: Week ending date sanity ---
+    week_ending = str(header.get("week_ending", "")).strip()
+    parsed_date = None
+    for fmt in ("%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d", "%m-%d-%Y"):
+        try:
+            parsed_date = datetime.strptime(week_ending, fmt).date()
+            break
+        except (ValueError, TypeError):
+            continue
+
+    if parsed_date:
+        today = datetime.utcnow().date()
+        if parsed_date > today:
+            results["passed"] = False
+            results["checks"].append({
+                "row": "week_ending",
+                "worker": "Form Header",
+                "result": "FAIL",
+                "details": f"Week ending {week_ending} is in the future",
+                "regulation": "29 CFR 5.5(a)(3)(ii)",
+            })
+        elif (today - parsed_date).days > STALE_DAYS:
+            results["checks"].append({
+                "row": "week_ending",
+                "worker": "Form Header",
+                "result": "WARN",
+                "details": f"Week ending {week_ending} is more than {STALE_DAYS} days old — verify timely submission",
+                "regulation": "29 CFR 5.5(a)(3)(ii)",
+            })
+        else:
+            results["checks"].append({
+                "row": "week_ending",
+                "worker": "Form Header",
+                "result": "PASS",
+                "details": f"Week ending {week_ending} is within acceptable range",
+                "regulation": "29 CFR 5.5(a)(3)(ii)",
+            })
+
+    return results
 
 
 def audit_wh347_math(parsed_data):

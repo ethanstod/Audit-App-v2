@@ -284,6 +284,17 @@ def audit_all_workers(parsed_data, wage_table):
                 f"(base ${required_base:.2f} + fringe ${required_fringe:.2f}){fuzzy_note}"
             )
 
+        # Back-wages estimate when base rate is insufficient
+        st_hours   = float(worker.get("st_hours", worker.get("total_hours", 0)))
+        ot_hours   = float(worker.get("ot_hours", 0))
+        dt_hours   = float(worker.get("dt_hours", 0))
+        base_shortfall  = max(0.0, round(required_base - st_rate, 2))
+        fringe_shortfall = max(0.0, round(required_fringe - reported_fringe, 2))
+        weighted_hours = round(st_hours + 1.5 * ot_hours + 2.0 * dt_hours, 2)
+        back_wages = round(
+            base_shortfall * weighted_hours + fringe_shortfall * (st_hours + ot_hours + dt_hours), 2
+        )
+
         if issues:
             results["passed"] = False
             results["by_row"][row] = {
@@ -293,6 +304,7 @@ def audit_all_workers(parsed_data, wage_table):
                 "severity": "VIOLATION",
                 "required_base_rate": required_base,
                 "required_fringe": required_fringe,
+                "back_wages_estimate": back_wages,
             }
         else:
             results["by_row"][row] = {
@@ -302,6 +314,7 @@ def audit_all_workers(parsed_data, wage_table):
                 "severity": "",
                 "required_base_rate": required_base,
                 "required_fringe": required_fringe,
+                "back_wages_estimate": 0.0,
             }
 
         results["checks"].append({

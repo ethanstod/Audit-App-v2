@@ -3,7 +3,7 @@ import argparse
 # git push test - Claude Code integration check
 
 from pdf_parser import extract_wh347_data
-from math_audit import audit_wh347_math
+from math_audit import audit_wh347_math, audit_payroll_sanity
 from cwhssa_audit import audit_cwhssa
 from pay_audit import load_wage_table, audit_all_workers, audit_apprentice_rates, audit_deductions
 from fringe_audit import audit_fringe_benefits
@@ -38,32 +38,36 @@ def audit_wh347_form(pdf_path, wage_table_path="cleaned_rates.xlsx", output_path
 
     print("\n[*] Running audit modules...")
 
-    print("    [1/7] Header & Statement of Compliance...")
+    print("    [1/8] Header & Statement of Compliance...")
     header_results = audit_header(parsed_data)
 
-    print("    [2/7] Mathematical validation...")
+    print("    [2/8] Payroll sanity checks...")
+    sanity_results = audit_payroll_sanity(parsed_data)
+
+    print("    [3/8] Mathematical validation...")
     math_results = audit_wh347_math(parsed_data)
 
-    print("    [3/7] CWHSSA overtime compliance...")
+    print("    [4/8] CWHSSA overtime compliance...")
     cwhssa_results = audit_cwhssa(parsed_data)
 
-    print("    [4/7] Loading wage table...")
+    print("    [5/8] Loading wage table...")
     wage_table = load_wage_table(wage_table_path)
 
-    print("    [5/7] Prevailing wage / classification checks...")
+    print("    [6/8] Prevailing wage / classification checks...")
     pay_results = audit_all_workers(parsed_data, wage_table)
     class_results = audit_classifications(parsed_data, wage_table)
 
-    print("    [6/7] Fringe benefit compliance...")
+    print("    [7/8] Fringe benefit compliance...")
     fringe_results = audit_fringe_benefits(parsed_data, wage_table)
 
-    print("    [7/7] Apprentice rates, ratios & deductions...")
+    print("    [8/8] Apprentice rates, ratios & deductions...")
     apprentice_results = audit_apprentice_rates(parsed_data, wage_table)
     deduction_results = audit_deductions(parsed_data)
 
     # Overall pass = every module passed
     overall_pass = all([
         header_results.get("passed", True),
+        sanity_results.get("passed", True),
         math_results.get("passed", True),
         cwhssa_results.get("passed", True),
         pay_results.get("passed", True),
@@ -76,6 +80,7 @@ def audit_wh347_form(pdf_path, wage_table_path="cleaned_rates.xlsx", output_path
     report_data = {
         "parsed_data":   parsed_data,
         "header_audit":  header_results,
+        "sanity":        sanity_results,
         "math":          math_results,
         "cwhssa":        cwhssa_results,
         "pay":           pay_results,
@@ -100,6 +105,7 @@ def audit_wh347_form(pdf_path, wage_table_path="cleaned_rates.xlsx", output_path
 
     modules = [
         ("Header / Compliance",  header_results),
+        ("Payroll Sanity",       sanity_results),
         ("Math Validation",      math_results),
         ("CWHSSA Overtime",      cwhssa_results),
         ("Prevailing Wage",      pay_results),

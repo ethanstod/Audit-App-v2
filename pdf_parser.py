@@ -508,18 +508,38 @@ def extract_compliance_statement(pdf_path):
 # ---------------------------------------------------------------------------
 
 def _is_itextsharp_format(pdf_path):
-    """Returns True if the PDF uses the iTextSharp WH-347 format."""
+    """
+    Returns True if the PDF uses the LCPtracker / iTextSharp WH-347 format.
+
+    Accepts two layouts:
+      A) Standard: the 27-col payroll grid itself starts with a 'PROJECT NAME'
+         label row (classic LCPtracker multi-page export).
+      B) Split:    a separate 4-col header table contains 'PROJECT NAME', and
+         a 27-col grid table holds only the payroll rows (used by the test
+         PDF generator so labels have enough room to render fully).
+    """
     with pdfplumber.open(pdf_path) as pdf:
         if not pdf.pages:
             return False
-        tables = pdf.pages[0].extract_tables()
-        if not tables or not tables[0] or not tables[0][0]:
+        all_tables = pdf.pages[0].extract_tables()
+        if not all_tables:
             return False
-        num_cols = len(tables[0][0])
-        if num_cols < 26:
+
+        has_wide_table = any(
+            table and table[0] and len(table[0]) >= 26
+            for table in all_tables
+        )
+        if not has_wide_table:
             return False
-        first_cell = str(tables[0][0][0] or '').strip().upper()
-        return 'PROJECT NAME' in first_cell
+
+        # 'PROJECT NAME' may be in any table on page 1 (including a separate header table)
+        for table in all_tables:
+            if not table:
+                continue
+            for row in table[:6]:
+                if row and 'PROJECT NAME' in str(row[0] or '').strip().upper():
+                    return True
+        return False
 
 
 def _extract_itextsharp_data(pdf_path):
@@ -578,200 +598,166 @@ def _extract_itextsharp_data(pdf_path):
 
     with pdfplumber.open(pdf_path) as pdf:
         for page_num, page in enumerate(pdf.pages, 1):
-            tables = page.extract_tables()
-            if not tables:
-                continue
-            table = tables[0]
-            if not table:
+            all_tables = page.extract_tables()
+            if not all_tables:
                 continue
 
-            for row_idx, row in enumerate(table):
-                if not row:
-                    continue
-                row_len = len(row)
-                cell0 = cl(row[0])
-
-                # ----------------------------------------------------------
-                # Header extraction (page with 27-col PROJECT NAME table)
-                # ----------------------------------------------------------
-                if not header_extracted and row_len >= 27 and 'PROJECT NAME' in cell0.upper():
-                    # Values row is row_idx + 1
-                    if row_idx + 1 < len(table):
-                        v1 = table[row_idx + 1]
-                        header['project_name']   = cl(v1[0])  if len(v1) > 0  else ''
-                        header['contract_number']= cl(v1[5])  if len(v1) > 5  else ''
-                        header['payroll_number'] = cl(v1[9])  if len(v1) > 9  else ''
-                        header['contractor_name']= cl(v1[16]) if len(v1) > 16 else ''
-                    # Location/wage-det row is row_idx + 2 (label) and + 3 (value)
-                    if row_idx + 3 < len(table):
-                        v3 = table[row_idx + 3]
-                        header['project_location']          = cl(v3[0])  if len(v3) > 0  else ''
-                        header['wage_determination_number'] = cl(v3[5])  if len(v3) > 5  else ''
-                        header['week_ending']               = cl(v3[9])  if len(v3) > 9  else ''
-                        header['contractor_address']        = cl(v3[16]) if len(v3) > 16 else ''
-                    header_extracted = True
+            # Scan every table on the page so the compliance block is found
+            # even when it lives in a separate table from the payroll grid.
+            for table in all_tables:
+                if not table:
                     continue
 
-                # ----------------------------------------------------------
-                # Signature block (5-col: name | None | date | phone | email)
-                # Also scan for certifying official name/title in any cell
-                # ----------------------------------------------------------
-                if 'SIGNATURE OF CERTIFYING OFFICIAL' in cell0.upper() and row_idx + 1 < len(table):
-                    sig = table[row_idx + 1]
-                    name_val = cl(sig[0]) if sig else ''
-                    date_val = cl(sig[2]) if len(sig) > 2 else ''
-                    if name_val:
-                        compliance_statement['certified_name'] = name_val
-                    if re.search(r'\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}', date_val):
-                        compliance_statement['certified_date']      = date_val
-                        compliance_statement['certified_signature'] = True
-                        compliance_statement['detected_by_text']    = True
-                    continue
+                for row_idx, row in enumerate(table):
+                    if not row:
+                        continue
+                    row_len = len(row)
+                    cell0 = cl(row[0])
 
-                # Certifying official name/title: scan label row for 'CERTIFYING OFFICIAL'
-                # then read the value from the same column in the next row.
-                # (e.g. page 4: label at col 21, value 'Mary Mead / Payroll Manager' at col 21)
-                if not compliance_statement['certified_title']:
-                    for ci, cv in enumerate(row):
-                        if cv and 'CERTIFYING OFFICIAL' in str(cv).upper():
-                            if row_idx + 1 < len(table) and ci < len(table[row_idx + 1]):
-                                name_title = cl(table[row_idx + 1][ci])
-                                if name_title and '/' in name_title:
-                                    parts = [p.strip() for p in name_title.split('/')]
-                                    if len(parts) >= 2 and parts[0] and parts[1]:
-                                        compliance_statement['certified_name'] = (
-                                            compliance_statement['certified_name'] or parts[0]
-                                        )
-                                        compliance_statement['certified_title'] = parts[1]
-                            break
+                    # ----------------------------------------------------------
+                    # Header extraction — two supported layouts:
+                    #   A) 27-col: "PROJECT NAME" label is in cell[0] of the
+                    #      payroll grid itself (classic LCPtracker export).
+                    #   B) 4-col:  A separate wide header table carries the
+                    #      labels/values (test PDF generator layout).
+                    # ----------------------------------------------------------
+                    if not header_extracted and 'PROJECT NAME' in cell0.upper():
+                        if row_len >= 27:
+                            # Layout A: header is embedded in the 27-col grid
+                            if row_idx + 1 < len(table):
+                                v1 = table[row_idx + 1]
+                                header['project_name']    = cl(v1[0])  if len(v1) > 0  else ''
+                                header['contract_number'] = cl(v1[5])  if len(v1) > 5  else ''
+                                header['payroll_number']  = cl(v1[9])  if len(v1) > 9  else ''
+                                header['contractor_name'] = cl(v1[16]) if len(v1) > 16 else ''
+                            if row_idx + 3 < len(table):
+                                v3 = table[row_idx + 3]
+                                header['project_location']          = cl(v3[0])  if len(v3) > 0  else ''
+                                header['wage_determination_number'] = cl(v3[5])  if len(v3) > 5  else ''
+                                header['week_ending']               = cl(v3[9])  if len(v3) > 9  else ''
+                                header['contractor_address']        = cl(v3[16]) if len(v3) > 16 else ''
+                        else:
+                            # Layout B: separate 4-col header table
+                            # Row structure: [label_row, value_row, label_row2, value_row2]
+                            if row_idx + 1 < len(table):
+                                v1 = table[row_idx + 1]
+                                header['project_name']    = cl(v1[0]) if len(v1) > 0 else ''
+                                header['contract_number'] = cl(v1[1]) if len(v1) > 1 else ''
+                                header['payroll_number']  = cl(v1[2]) if len(v1) > 2 else ''
+                                header['contractor_name'] = cl(v1[3]) if len(v1) > 3 else ''
+                            if row_idx + 3 < len(table):
+                                v3 = table[row_idx + 3]
+                                header['project_location']          = cl(v3[0]) if len(v3) > 0 else ''
+                                header['wage_determination_number'] = cl(v3[1]) if len(v3) > 1 else ''
+                                header['week_ending']               = cl(v3[2]) if len(v3) > 2 else ''
+                                header['contractor_address']        = cl(v3[3]) if len(v3) > 3 else ''
+                        header_extracted = True
+                        continue
 
-                # ----------------------------------------------------------
-                # Worker data rows
-                # Determine column offsets by row width
-                # ----------------------------------------------------------
-                if row_len >= 27:
-                    # 27-col page-1 layout
-                    j_ra_col    = 6
-                    cls_col     = 7
-                    type_col    = 8
-                    day_start   = 9
-                    day_end     = 16   # exclusive (7 cols: 9-15)
-                    total_h_col = 16
-                    rate_col    = 17
-                    fringe_c_col= 18
-                    week_g_col  = 20
-                    withhold_col= 22
-                    fica_col    = 23
-                    total_d_col = 25
-                    net_col     = 26
-                elif row_len >= 26:
-                    # 26-col pages-2+ layout (no extra blank)
-                    j_ra_col    = 5
-                    cls_col     = 6
-                    type_col    = 7
-                    day_start   = 8
-                    day_end     = 15   # exclusive (7 cols: 8-14)
-                    total_h_col = 15
-                    rate_col    = 16
-                    fringe_c_col= 17
-                    week_g_col  = 19
-                    withhold_col= 21
-                    fica_col    = 22
-                    total_d_col = 24
-                    net_col     = 25
-                else:
-                    continue
+                    # ----------------------------------------------------------
+                    # Signature block (5-col: name | title | date | phone | email)
+                    # ----------------------------------------------------------
+                    if 'SIGNATURE OF CERTIFYING OFFICIAL' in cell0.upper() and row_idx + 1 < len(table):
+                        sig = table[row_idx + 1]
+                        name_val = cl(sig[0]) if sig else ''
+                        date_val = cl(sig[2]) if len(sig) > 2 else ''
+                        if name_val:
+                            compliance_statement['certified_name'] = name_val
+                        if re.search(r'\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}', date_val):
+                            compliance_statement['certified_date']      = date_val
+                            compliance_statement['certified_signature'] = True
+                            compliance_statement['detected_by_text']    = True
+                        continue
 
-                row_type = cl(row[type_col]).upper() if type_col < row_len else ''
-                is_primary = bool(cell0 and cell0.isdigit())
+                    # Certifying official name/title: scan any cell for the label,
+                    # then read "Name / Title" from the same column in the next row.
+                    if not compliance_statement['certified_title']:
+                        for ci, cv in enumerate(row):
+                            if cv and 'CERTIFYING OFFICIAL' in str(cv).upper():
+                                if row_idx + 1 < len(table) and ci < len(table[row_idx + 1]):
+                                    name_title = cl(table[row_idx + 1][ci])
+                                    if name_title and '/' in name_title:
+                                        parts = [p.strip() for p in name_title.split('/')]
+                                        if len(parts) >= 2 and parts[0] and parts[1]:
+                                            compliance_statement['certified_name'] = (
+                                                compliance_statement['certified_name'] or parts[0]
+                                            )
+                                            compliance_statement['certified_title'] = parts[1]
+                                break
 
-                # Skip non-data rows (header labels, date rows, blank rows, etc.)
-                if not is_primary and row_type not in ('ST', 'OT', 'DT'):
-                    continue
+                    # ----------------------------------------------------------
+                    # Worker data rows — column offsets depend on table width
+                    # ----------------------------------------------------------
+                    if row_len >= 27:
+                        j_ra_col    = 6;  cls_col     = 7;  type_col    = 8
+                        day_start   = 9;  day_end     = 16; total_h_col = 16
+                        rate_col    = 17; fringe_c_col= 18; week_g_col  = 20
+                        withhold_col= 22; fica_col    = 23; total_d_col = 25; net_col = 26
+                    elif row_len >= 26:
+                        j_ra_col    = 5;  cls_col     = 6;  type_col    = 7
+                        day_start   = 8;  day_end     = 15; total_h_col = 15
+                        rate_col    = 16; fringe_c_col= 17; week_g_col  = 19
+                        withhold_col= 21; fica_col    = 22; total_d_col = 24; net_col = 25
+                    else:
+                        continue
 
-                # Determine current row number
-                if is_primary and cell0.isdigit():
-                    last_row_num = int(cell0)
-                if last_row_num == 0:
-                    continue
-                rn = last_row_num
+                    row_type   = cl(row[type_col]).upper() if type_col < row_len else ''
+                    is_primary = bool(cell0 and cell0.isdigit())
 
-                # Compute daily hours sum for this sub-row
-                daily_hours = sum(sf(row[i]) for i in range(day_start, day_end) if i < row_len)
-                rate = sf(row[rate_col]) if rate_col < row_len else 0.0
+                    if not is_primary and row_type not in ('ST', 'OT', 'DT'):
+                        continue
 
-                # Initialize worker record if needed
-                if rn not in all_workers:
-                    all_workers[rn] = {
-                        'row_number':              rn,
-                        'last_name':               '',
-                        'first_name':              '',
-                        'middle_initial':          '',
-                        'worker_id':               '',
-                        'j_ra':                    '',
-                        'classification':          '',
-                        'st_hours':                0.0,
-                        'ot_hours':                0.0,
-                        'dt_hours':                0.0,
-                        'total_hours':             0.0,
-                        'st_rate':                 0.0,
-                        'ot_rate':                 0.0,
-                        'dt_rate':                 0.0,
-                        'rate':                    0.0,
-                        'st_gross':                0.0,
-                        'ot_gross':                0.0,
-                        'dt_gross':                0.0,
-                        'gross':                   0.0,
-                        'fica':                    0.0,
-                        'withholding':             0.0,
-                        'deductions':              0.0,
-                        'net':                     0.0,
-                        'fringe_paid_cash':        0.0,
-                        'fringe_plan_name':        '',
-                        'fringe_plan_amount':      0.0,
-                        'apprentice_program_name': '',
-                        'apprentice_period':       0,
-                        'apprentice_percent':      0.0,
-                    }
+                    if is_primary and cell0.isdigit():
+                        last_row_num = int(cell0)
+                    if last_row_num == 0:
+                        continue
+                    rn = last_row_num
 
-                w = all_workers[rn]
+                    daily_hours = sum(sf(row[i]) for i in range(day_start, day_end) if i < row_len)
+                    rate = sf(row[rate_col]) if rate_col < row_len else 0.0
 
-                # Fill identity fields from the primary (ST) row
-                if is_primary:
-                    w['last_name']       = cl(row[1]).title()
-                    w['first_name']      = cl(row[2]).title()
-                    w['middle_initial']  = cl(row[3])
-                    w['worker_id']       = cl(row[4])
-                    w['j_ra']            = cl(row[j_ra_col]).upper()
-                    w['classification']  = cl(row[cls_col])
-                    # Total hours shown on ST row = weekly total (all types)
-                    w['total_hours']     = sf(row[total_h_col]) if total_h_col < row_len else 0.0
-                    # Weekly gross (all types combined) — shown on ST row only
-                    w['gross']           = sf(row[week_g_col])  if week_g_col  < row_len else 0.0
-                    # Fringe credit
-                    w['fringe_paid_cash']= sf(row[fringe_c_col]) if fringe_c_col < row_len else 0.0
-                    # Deductions on this form are cumulative (YTD), not weekly.
-                    # Set deductions=0 and net=gross so math audit check #2 passes
-                    # without spurious failures. Store FICA/withholding for reference.
-                    w['fica']            = sf(row[fica_col])     if fica_col     < row_len else 0.0
-                    w['withholding']     = sf(row[withhold_col]) if withhold_col < row_len else 0.0
-                    w['deductions']      = 0.0
-                    w['net']             = w['gross']
+                    if rn not in all_workers:
+                        all_workers[rn] = {
+                            'row_number': rn, 'last_name': '', 'first_name': '',
+                            'middle_initial': '', 'worker_id': '', 'j_ra': '',
+                            'classification': '', 'st_hours': 0.0, 'ot_hours': 0.0,
+                            'dt_hours': 0.0, 'total_hours': 0.0, 'st_rate': 0.0,
+                            'ot_rate': 0.0, 'dt_rate': 0.0, 'rate': 0.0,
+                            'st_gross': 0.0, 'ot_gross': 0.0, 'dt_gross': 0.0,
+                            'gross': 0.0, 'fica': 0.0, 'withholding': 0.0,
+                            'deductions': 0.0, 'net': 0.0, 'fringe_paid_cash': 0.0,
+                            'fringe_plan_name': '', 'fringe_plan_amount': 0.0,
+                            'apprentice_program_name': '', 'apprentice_period': 0,
+                            'apprentice_percent': 0.0,
+                        }
 
-                # Per-type hours and rates
-                if row_type == 'ST':
-                    w['st_hours'] = daily_hours
-                    w['st_rate']  = rate
-                    w['rate']     = rate
-                    w['st_gross'] = round(daily_hours * rate, 2)
-                elif row_type == 'OT':
-                    w['ot_hours'] = daily_hours
-                    w['ot_rate']  = rate
-                    w['ot_gross'] = round(daily_hours * rate, 2)
-                elif row_type == 'DT':
-                    w['dt_hours'] = daily_hours
-                    w['dt_rate']  = rate
-                    w['dt_gross'] = round(daily_hours * rate, 2)
+                    w = all_workers[rn]
+
+                    if is_primary:
+                        w['last_name']        = cl(row[1]).title()
+                        w['first_name']       = cl(row[2]).title()
+                        w['middle_initial']   = cl(row[3])
+                        w['worker_id']        = cl(row[4])
+                        w['j_ra']             = cl(row[j_ra_col]).upper()
+                        w['classification']   = cl(row[cls_col])
+                        w['total_hours']      = sf(row[total_h_col]) if total_h_col < row_len else 0.0
+                        w['gross']            = sf(row[week_g_col])  if week_g_col  < row_len else 0.0
+                        w['fringe_paid_cash'] = sf(row[fringe_c_col]) if fringe_c_col < row_len else 0.0
+                        # Deductions on this form are YTD cumulative; treat as 0 for math audit
+                        w['fica']             = sf(row[fica_col])     if fica_col     < row_len else 0.0
+                        w['withholding']      = sf(row[withhold_col]) if withhold_col < row_len else 0.0
+                        w['deductions']       = 0.0
+                        w['net']              = w['gross']
+
+                    if row_type == 'ST':
+                        w['st_hours'] = daily_hours; w['st_rate'] = rate
+                        w['rate'] = rate; w['st_gross'] = round(daily_hours * rate, 2)
+                    elif row_type == 'OT':
+                        w['ot_hours'] = daily_hours; w['ot_rate'] = rate
+                        w['ot_gross'] = round(daily_hours * rate, 2)
+                    elif row_type == 'DT':
+                        w['dt_hours'] = daily_hours; w['dt_rate'] = rate
+                        w['dt_gross'] = round(daily_hours * rate, 2)
 
     # If certifying name found but no date, still mark as having a compliance statement
     if compliance_statement['certified_name'] and not compliance_statement['certified_date']:

@@ -58,6 +58,7 @@ def _combine_row_status(row_number, audit_results_list):
     regulations = []
     required_base_rate = None
     required_fringe = None
+    back_wages = 0.0
 
     for audit in audit_results_list:
         by_row = audit.get("by_row", {})
@@ -73,15 +74,16 @@ def _combine_row_status(row_number, audit_results_list):
             reasons.append(f"[{audit.get('audit_name', '?').upper()}] {entry['reason']}")
         if entry.get("regulation"):
             regulations.append(entry["regulation"])
-        # Pull required rates from the pay audit entry
+        # Pull required rates and back-wages estimate from the pay audit entry
         if audit.get("audit_name") == "pay":
             if entry.get("required_base_rate") is not None:
                 required_base_rate = entry["required_base_rate"]
             if entry.get("required_fringe") is not None:
                 required_fringe = entry["required_fringe"]
+            back_wages += float(entry.get("back_wages_estimate", 0.0))
 
     return (combined, " | ".join(reasons), "; ".join(set(regulations)),
-            required_base_rate, required_fringe)
+            required_base_rate, required_fringe, back_wages)
 
 
 def _fmt(val, prefix="$"):
@@ -106,7 +108,7 @@ def _section_summary(parsed_data, report_data, timestamp):
     cwhssa = report_data.get("cwhssa", {})
     ld_estimate = cwhssa.get("total_liquidated_damages_estimate", 0.0)
 
-    audit_modules = ["header_audit", "math", "cwhssa", "pay", "fringe",
+    audit_modules = ["header_audit", "sanity", "math", "cwhssa", "pay", "fringe",
                      "apprentice", "deductions", "classification"]
     module_statuses = []
     for m in audit_modules:
@@ -197,11 +199,13 @@ def _section_worker_detail(workers, audit_results_list):
         return ""
 
     rows = ""
+    total_back_wages = 0.0
     for w in workers:
         row_no = w.get("row_number")
-        combined, reasons, regulations, req_base, req_fringe = _combine_row_status(
+        combined, reasons, regulations, req_base, req_fringe, back_wages = _combine_row_status(
             row_no, audit_results_list
         )
+        total_back_wages += back_wages
 
         reason_html = ""
         if reasons:
@@ -226,8 +230,9 @@ def _section_worker_detail(workers, audit_results_list):
         if req_fringe is not None and reported_fringe_cash < req_fringe - 0.02:
             fringe_style = "background:#f8d7da;font-weight:bold;"
 
-        req_base_cell  = f"${req_base:.2f}" if req_base is not None else "—"
+        req_base_cell   = f"${req_base:.2f}" if req_base is not None else "—"
         req_fringe_cell = f"${req_fringe:.2f}" if req_fringe is not None else "—"
+        back_wages_cell = f'<span style="color:#dc3545;font-weight:bold">${back_wages:.2f}</span>' if back_wages > 0 else "—"
 
         rows += f"""
         <tr>
@@ -247,8 +252,15 @@ def _section_worker_detail(workers, audit_results_list):
             <td style="font-size:11px;color:#888">{req_fringe_cell}</td>
             <td>{_fmt(w.get('deductions', 0))}</td>
             <td>{_fmt(w.get('net', 0))}</td>
+            <td>{back_wages_cell}</td>
             <td>{_badge(combined)}{reason_html}{reg_html}</td>
         </tr>"""
+
+    bw_summary = ""
+    if total_back_wages > 0:
+        bw_summary = (f'<p style="color:#dc3545;font-weight:bold;margin-top:8px;">'
+                      f'Estimated Total Back-Wages Owed: ${total_back_wages:.2f} '
+                      f'(base shortfall × weighted hours + fringe shortfall × total hours)</p>')
 
     return f"""
     <section>
@@ -257,7 +269,9 @@ def _section_worker_detail(workers, audit_results_list):
             <span style="background:#f8d7da;padding:2px 6px;border-radius:3px;">Red cells</span>
             indicate reported value is below the prevailing wage requirement.
             &ldquo;Req. Base&rdquo; and &ldquo;Req. Fringe&rdquo; show the wage determination amounts.
+            &ldquo;Back-Wages&rdquo; is an estimate of wages owed per worker this payroll period.
         </p>
+        {bw_summary}
         <div style="overflow-x:auto">
         <table>
             <tr>
@@ -277,6 +291,7 @@ def _section_worker_detail(workers, audit_results_list):
                 <th>Req. Fringe</th>
                 <th>Deductions</th>
                 <th>Net</th>
+                <th>Back-Wages Est.</th>
                 <th>Audit Status</th>
             </tr>
             {rows}
@@ -416,6 +431,7 @@ def generate_wh347_html_report(report_data, output_path=None):
     # All audit result dicts in a list (for per-row combination)
     audit_results_list = [
         r for r in [
+            report_data.get("sanity"),
             report_data.get("math"),
             report_data.get("cwhssa"),
             report_data.get("pay"),
