@@ -109,10 +109,22 @@ def extract_metadata(file_path: str, doc_type: str) -> dict:
     with open(file_path, "rb") as fh:
         pdf_b64 = base64.standard_b64encode(fh.read()).decode("utf-8")
 
+    prompt_text = _PROMPTS[doc_type].strip()
     client = anthropic.Anthropic()
     response = client.messages.create(
         model=MODEL,
         max_tokens=1024,
+        system=[
+            {
+                "type": "text",
+                "text": (
+                    "You extract structured metadata from construction payroll and compliance "
+                    "documents for Davis-Bacon Act audits. Return ONLY valid JSON — no markdown, "
+                    "no prose."
+                ),
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
         messages=[
             {
                 "role": "user",
@@ -124,10 +136,11 @@ def extract_metadata(file_path: str, doc_type: str) -> dict:
                             "media_type": "application/pdf",
                             "data": pdf_b64,
                         },
+                        "cache_control": {"type": "ephemeral"},
                     },
                     {
                         "type": "text",
-                        "text": _PROMPTS[doc_type].strip(),
+                        "text": prompt_text,
                     },
                 ],
             }

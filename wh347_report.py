@@ -74,12 +74,14 @@ def _combine_row_status(row_number, audit_results_list):
             reasons.append(f"[{audit.get('audit_name', '?').upper()}] {entry['reason']}")
         if entry.get("regulation"):
             regulations.append(entry["regulation"])
-        # Pull required rates and back-wages estimate from the pay audit entry
+        # Pull required rates from pay audit; back-wages from pay + cwhssa
         if audit.get("audit_name") == "pay":
             if entry.get("required_base_rate") is not None:
                 required_base_rate = entry["required_base_rate"]
             if entry.get("required_fringe") is not None:
                 required_fringe = entry["required_fringe"]
+            back_wages += float(entry.get("back_wages_estimate", 0.0))
+        if audit.get("audit_name") == "cwhssa":
             back_wages += float(entry.get("back_wages_estimate", 0.0))
 
     return (combined, " | ".join(reasons), "; ".join(set(regulations)),
@@ -264,7 +266,7 @@ def _section_worker_detail(workers, audit_results_list):
 
     return f"""
     <section>
-        <h2>3. Worker Detail</h2>
+        <h2>4. Worker Detail</h2>
         <p style="font-size:12px;color:#666;">
             <span style="background:#f8d7da;padding:2px 6px;border-radius:3px;">Red cells</span>
             indicate reported value is below the prevailing wage requirement.
@@ -319,7 +321,7 @@ def _section_violations(audit_results_list):
     if not violations:
         return """
         <section>
-            <h2>4. Violations &amp; Warnings</h2>
+            <h2>5. Violations &amp; Warnings</h2>
             <p style="color:#28a745;font-weight:bold;">✓ No violations or warnings found.</p>
         </section>
         """
@@ -337,7 +339,7 @@ def _section_violations(audit_results_list):
 
     return f"""
     <section>
-        <h2>4. Violations &amp; Warnings ({len(violations)} finding(s))</h2>
+        <h2>5. Violations &amp; Warnings ({len(violations)} finding(s))</h2>
         <table>
             <tr>
                 <th>Audit Module</th>
@@ -371,7 +373,7 @@ def _section_apprentice_ratios(apprentice_results):
 
     return f"""
     <section>
-        <h2>5. Apprentice / Journeyman Ratio Summary</h2>
+        <h2>6. Apprentice / Journeyman Ratio Summary</h2>
         <table>
             <tr>
                 <th>Trade Classification</th>
@@ -390,6 +392,164 @@ def _section_apprentice_ratios(apprentice_results):
     """
 
 
+def _section_sanity(sanity_results):
+    """Renders payroll-level sanity check findings."""
+    if not sanity_results:
+        return ""
+
+    checks = sanity_results.get("checks", [])
+    if not checks:
+        return ""
+
+    rows = ""
+    for c in checks:
+        rows += f"""
+        <tr>
+            <td>{c.get('row', '')}</td>
+            <td>{c.get('worker', '')}</td>
+            <td>{_badge(c.get('result', 'PASS'))}</td>
+            <td style="font-size:12px">{c.get('details', '')}</td>
+            <td style="font-size:11px;color:#888">{c.get('regulation', '')}</td>
+        </tr>"""
+
+    return f"""
+    <section>
+        <h2>3. Payroll Sanity Checks</h2>
+        <table>
+            <tr>
+                <th>Row / Field</th>
+                <th>Worker</th>
+                <th>Status</th>
+                <th>Details</th>
+                <th>Regulation</th>
+            </tr>
+            {rows}
+        </table>
+    </section>
+    """
+
+
+_REMEDIATION_TEMPLATES = {
+    "pay": (
+        "Submit a corrected certified payroll for {worker} (Row {row}) with base rate ≥ "
+        "${req_base:.2f}/hr and total compensation ≥ ${req_total:.2f}/hr. "
+        "Pay back-wages of ${back_wages:.2f} for this payroll period."
+    ),
+    "cwhssa": (
+        "Submit a corrected payroll for {worker} (Row {row}) showing correct OT hours and/or "
+        "OT rate. Pay overtime premium back-wages of ${back_wages:.2f}. "
+        "Review CWHSSA liquidated damages exposure (29 CFR 5.8)."
+    ),
+    "apprentice": (
+        "Upload the apprentice registration certificate for {worker} (Row {row}) and verify "
+        "the period percentage matches the reported rate. "
+        "Contact the apprenticeship program sponsor if the certificate is unavailable."
+    ),
+    "fringe": (
+        "For {worker} (Row {row}): ensure total compensation (base + fringe) meets the "
+        "wage determination total package, or document bona fide plan contributions with "
+        "the plan name and administrator."
+    ),
+    "math": (
+        "For {worker} (Row {row}): recalculate and resubmit payroll — hours, rates, or "
+        "net/gross arithmetic does not reconcile. Verify source timesheets."
+    ),
+    "classification": (
+        "For {worker} (Row {row}): verify the worker classification against the wage "
+        "determination and resubmit with the correct classification if needed."
+    ),
+    "deductions": (
+        "For {worker} (Row {row}): verify all deductions are authorized per 29 CFR 3.5. "
+        "Obtain signed deduction authorization forms and retain on file."
+    ),
+    "header": (
+        "Complete all required WH-347 header fields before resubmitting: "
+        "{reason}"
+    ),
+    "sanity": (
+        "Payroll data integrity issue for {worker} (Row {row}): {reason}"
+    ),
+}
+
+
+def _section_remediation(audit_results_list, workers):
+    """
+    Builds a numbered checklist of concrete corrective actions from all violations.
+    Groups by worker when possible.
+    """
+    actions = []
+
+    worker_map = {w.get("row_number"): w for w in workers}
+
+    for audit in audit_results_list:
+        name = audit.get("audit_name", "")
+        for row, entry in audit.get("by_row", {}).items():
+            if entry.get("result") not in ("FAIL", "WARN"):
+                continue
+
+            w = worker_map.get(row, {})
+            worker_label = (
+                f"{w.get('last_name', '')}, {w.get('first_name', '')}".strip(", ")
+                if w else str(row)
+            )
+
+            req_base  = entry.get("required_base_rate") or 0.0
+            req_fringe = entry.get("required_fringe") or 0.0
+            req_total  = round(req_base + req_fringe, 2)
+            back_wages = float(entry.get("back_wages_estimate", 0.0))
+
+            template = _REMEDIATION_TEMPLATES.get(name, "")
+            if template:
+                try:
+                    text = template.format(
+                        worker=worker_label,
+                        row=row,
+                        req_base=req_base,
+                        req_total=req_total,
+                        back_wages=back_wages,
+                        reason=entry.get("reason", ""),
+                    )
+                except (KeyError, ValueError):
+                    text = f"[{name.upper()}] {entry.get('reason', '')} — Row {row}"
+            else:
+                text = f"[{name.upper()}] {entry.get('reason', '')} — Row {row}"
+
+            severity = entry.get("result", "WARN")
+            actions.append((severity, name.upper(), worker_label, row, text))
+
+    if not actions:
+        return ""
+
+    # FAIL items first, then WARN
+    actions.sort(key=lambda x: (0 if x[0] == "FAIL" else 1, x[1], str(x[3])))
+
+    items = ""
+    for i, (severity, module, worker, row, text) in enumerate(actions, 1):
+        color = "#dc3545" if severity == "FAIL" else "#856404"
+        tag   = "REQUIRED" if severity == "FAIL" else "ADVISORY"
+        items += f"""
+        <li style="margin-bottom:12px">
+            <span style="color:{color};font-weight:bold;font-size:11px">[{tag}]</span>
+            <span style="font-size:11px;color:#888;margin-left:4px">{module}</span>
+            <div style="margin-top:3px">{text}</div>
+        </li>"""
+
+    return f"""
+    <section>
+        <h2>7. Remediation Action List</h2>
+        <p style="font-size:12px;color:#666;">
+            Items marked <span style="color:#dc3545;font-weight:bold">REQUIRED</span>
+            are violations that must be corrected by resubmitting a certified payroll.
+            Items marked <span style="color:#856404;font-weight:bold">ADVISORY</span>
+            require verification or documentation.
+        </p>
+        <ol style="padding-left:20px">
+            {items}
+        </ol>
+    </section>
+    """
+
+
 def _section_regulation_reference():
     rows = "".join(
         f"<tr><td style='font-family:monospace;font-size:12px'>{cite}</td>"
@@ -398,7 +558,7 @@ def _section_regulation_reference():
     )
     return f"""
     <section>
-        <h2>6. Regulatory Reference</h2>
+        <h2>8. Regulatory Reference</h2>
         <table>
             <tr><th>Citation</th><th>Description</th></tr>
             {rows}
@@ -445,10 +605,12 @@ def generate_wh347_html_report(report_data, output_path=None):
     # Build sections
     sec1 = _section_summary(parsed_data, report_data, timestamp)
     sec2 = _section_header_audit(report_data.get("header_audit"))
-    sec3 = _section_worker_detail(workers, audit_results_list)
-    sec4 = _section_violations(audit_results_list)
-    sec5 = _section_apprentice_ratios(report_data.get("apprentice"))
-    sec6 = _section_regulation_reference()
+    sec3 = _section_sanity(report_data.get("sanity"))
+    sec4 = _section_worker_detail(workers, audit_results_list)
+    sec5 = _section_violations(audit_results_list)
+    sec6 = _section_apprentice_ratios(report_data.get("apprentice"))
+    sec7 = _section_remediation(audit_results_list, workers)
+    sec8 = _section_regulation_reference()
 
     overall_color = "#28a745" if overall_pass else "#dc3545"
     overall_label = "PASS" if overall_pass else "FAIL"
@@ -560,6 +722,8 @@ def generate_wh347_html_report(report_data, output_path=None):
     {sec4}
     {sec5}
     {sec6}
+    {sec7}
+    {sec8}
 
     <footer style="text-align:center;color:#adb5bd;font-size:11px;margin-top:30px;padding:10px;">
         WH-347 Federal Compliance Audit Engine &nbsp;|&nbsp;

@@ -7,14 +7,16 @@ Liquidated damages: $31 per calendar day per affected worker (2024 rate).
 
 CWHSSA_LIQUIDATED_DAMAGES_PER_DAY = 31.00
 OVERTIME_THRESHOLD = 40.0
+TOLERANCE = 0.02
 
 
 def audit_cwhssa(parsed_data):
     """
     Checks:
-    1. Workers with total_hours > 40 must have OT hours reported.
+    1. Workers with total_hours > 40 must have OT hours >= (total_hours - 40).
+       Catches both "no OT at all" and partial under-reporting.
     2. OT rate must be >= 1.5x ST rate.
-    3. Estimates liquidated damages exposure where applicable.
+    3. Estimates liquidated damages and back-wages where applicable.
 
     Regulation: 40 U.S.C. 3702; 29 CFR 5.8
     """
@@ -31,37 +33,64 @@ def audit_cwhssa(parsed_data):
     for worker in workers:
         row = worker.get("row_number")
         issues = []
+        back_wages = 0.0
 
         total_hrs = float(worker.get("total_hours", 0))
-        ot_hrs = float(worker.get("ot_hours", 0))
-        st_rate = float(worker.get("st_rate", 0))
-        ot_rate = float(worker.get("ot_rate", 0))
+        ot_hrs    = float(worker.get("ot_hours", 0))
+        st_rate   = float(worker.get("st_rate", 0))
+        ot_rate   = float(worker.get("ot_rate", 0))
 
-        # Check 1: OT hours required when total > 40
-        if total_hrs > OVERTIME_THRESHOLD and ot_hrs == 0.0:
-            overtime_hours_due = round(total_hrs - OVERTIME_THRESHOLD, 2)
-            # Estimate calendar days the violation occurred: assume OT was spread
-            # across the workweek (1 OT hour/day minimum → OT_hrs days affected).
-            # Use the lesser of OT hours and 5 (max workweek days) for the estimate.
-            est_days = min(5, max(1, round(overtime_hours_due)))
-            issues.append({
-                "text": (
-                    f"Worker has {total_hrs:.1f} total hours but no OT hours reported — "
-                    f"{overtime_hours_due:.1f} hrs should be paid at OT (1.5×) rate. "
-                    f"Est. LD exposure: {est_days} day(s) × ${CWHSSA_LIQUIDATED_DAMAGES_PER_DAY:.0f} "
-                    f"= ${est_days * CWHSSA_LIQUIDATED_DAMAGES_PER_DAY:.0f}."
-                ),
-                "regulation": "40 U.S.C. 3702; 29 CFR 5.8",
-                "severity": "VIOLATION",
-                "liquidated_damages": est_days * CWHSSA_LIQUIDATED_DAMAGES_PER_DAY,
-            })
+        # Check 1: All hours over 40 must be compensated at OT rate.
+        # Catches both zero-OT and partial under-reporting in one check.
+        if total_hrs > OVERTIME_THRESHOLD:
+            required_ot_hrs = round(total_hrs - OVERTIME_THRESHOLD, 2)
+            missing_ot_hrs  = round(required_ot_hrs - ot_hrs, 2)
+
+            if missing_ot_hrs > TOLERANCE:
+                est_days = min(5, max(1, round(missing_ot_hrs)))
+                ld_amount = est_days * CWHSSA_LIQUIDATED_DAMAGES_PER_DAY
+                # Back-wages: only the OT premium (0.5×) since the base was paid at ST
+                ot_back_wages = round(missing_ot_hrs * 0.5 * st_rate, 2) if st_rate > 0 else 0.0
+                back_wages += ot_back_wages
+
+                if ot_hrs == 0.0:
+                    text = (
+                        f"Worker has {total_hrs:.1f} total hours but no OT hours reported — "
+                        f"{required_ot_hrs:.1f} hrs must be paid at 1.5× rate. "
+                        f"OT premium back-wages est.: ${ot_back_wages:.2f}. "
+                        f"LD exposure: {est_days}d × ${CWHSSA_LIQUIDATED_DAMAGES_PER_DAY:.0f} "
+                        f"= ${ld_amount:.0f}."
+                    )
+                else:
+                    text = (
+                        f"Only {ot_hrs:.1f} OT hrs reported but {required_ot_hrs:.1f} are required "
+                        f"({total_hrs:.1f} total hrs − 40 threshold). "
+                        f"{missing_ot_hrs:.1f} hrs paid at ST instead of OT rate. "
+                        f"OT premium back-wages est.: ${ot_back_wages:.2f}. "
+                        f"LD exposure: {est_days}d × ${CWHSSA_LIQUIDATED_DAMAGES_PER_DAY:.0f} "
+                        f"= ${ld_amount:.0f}."
+                    )
+
+                issues.append({
+                    "text": text,
+                    "regulation": "40 U.S.C. 3702; 29 CFR 5.8",
+                    "severity": "VIOLATION",
+                    "liquidated_damages": ld_amount,
+                })
 
         # Check 2: OT rate must be >= 1.5x ST rate
         if ot_hrs > 0 and st_rate > 0:
             required_ot = round(st_rate * 1.5, 2)
-            if ot_rate < required_ot - 0.02:
+            if ot_rate < required_ot - TOLERANCE:
+                rate_shortfall = round(required_ot - ot_rate, 2)
+                ot_rate_back_wages = round(ot_hrs * rate_shortfall, 2)
+                back_wages += ot_rate_back_wages
                 issues.append({
-                    "text": f"OT rate ${ot_rate:.2f} < required ${required_ot:.2f} (1.5× ST rate ${st_rate:.2f})",
+                    "text": (
+                        f"OT rate ${ot_rate:.2f} < required ${required_ot:.2f} "
+                        f"(1.5× ST ${st_rate:.2f}). "
+                        f"Rate shortfall back-wages est.: ${ot_rate_back_wages:.2f}."
+                    ),
                     "regulation": "40 U.S.C. 3702; 29 CFR 5.8",
                     "severity": "VIOLATION",
                     "liquidated_damages": CWHSSA_LIQUIDATED_DAMAGES_PER_DAY,
@@ -85,6 +114,7 @@ def audit_cwhssa(parsed_data):
             "reason": " | ".join(reason_parts),
             "regulation": "40 U.S.C. 3702; 29 CFR 5.8" if issues else "",
             "severity": "VIOLATION" if violations else "",
+            "back_wages_estimate": round(back_wages, 2),
         }
 
         results["checks"].append({
