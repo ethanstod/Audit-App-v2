@@ -220,16 +220,18 @@ def run_full_audit(pdf_path, fringe_cash=0.0, fringe_plan_name="", fringe_plan_a
     ])
 
     return {
-        "parsed_data":  parsed_data,
-        "header_audit": header_results,
-        "math":         math_results,
-        "cwhssa":       cwhssa_results,
-        "pay":          pay_results,
-        "fringe":       fringe_results,
-        "apprentice":   apprentice_results,
-        "deductions":   deduction_results,
+        "parsed_data":    parsed_data,
+        "header_audit":   header_results,
+        "math":           math_results,
+        "cwhssa":         cwhssa_results,
+        "pay":            pay_results,
+        "fringe":         fringe_results,
+        "apprentice":     apprentice_results,
+        "deductions":     deduction_results,
         "classification": class_results,
-        "passed":       overall_pass,
+        "passed":         overall_pass,
+        "parse_warnings": parsed_data.get("parse_warnings", []),
+        "parser_used":    parsed_data.get("parser_used", "unknown"),
     }
 
 
@@ -330,6 +332,9 @@ def upload():
     try:
         report_data = run_full_audit(pdf_path, fringe_cash, fringe_plan_name, fringe_plan_amt)
         report_data["supp_docs"] = supp_docs
+        # Surface any parser warnings to the user
+        for w in report_data.get("parse_warnings", []):
+            flash(f"Parser warning: {w}", "warning")
         generate_wh347_html_report(report_data, report_path)
     except Exception as e:
         os.remove(pdf_path)

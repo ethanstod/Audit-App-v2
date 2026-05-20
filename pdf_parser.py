@@ -5,18 +5,150 @@ from datetime import datetime
 
 
 # ---------------------------------------------------------------------------
-# FreeText annotation extractor (for Jan 2025 DOL WH-347 form)
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+def _safe_float(val):
+    try:
+        return float(re.sub(r'[\s,]', '', str(val or '')))
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _clean(val):
+    if val is None:
+        return ''
+    return re.sub(r'\s+', ' ', str(val)).strip()
+
+
+def _blank_header():
+    return {
+        'contractor_name':           '',
+        'contractor_address':        '',
+        'payroll_number':            '',
+        'week_ending':               '',
+        'project_name':              '',
+        'project_location':          '',
+        'contract_number':           '',
+        'wage_determination_number': '',
+    }
+
+
+def _blank_compliance():
+    return {
+        'certified_signature': False,
+        'certified_name':      '',
+        'certified_title':     '',
+        'certified_date':      '',
+        'detected_by_text':    False,
+    }
+
+
+def _blank_worker(row_num=0):
+    return {
+        'row_number':              row_num,
+        'last_name':               '',
+        'first_name':              '',
+        'middle_initial':          '',
+        'worker_id':               '',
+        'j_ra':                    '',
+        'classification':          '',
+        'st_hours':                0.0,
+        'ot_hours':                0.0,
+        'dt_hours':                0.0,
+        'total_hours':             0.0,
+        'st_rate':                 0.0,
+        'ot_rate':                 0.0,
+        'dt_rate':                 0.0,
+        'rate':                    0.0,
+        'st_gross':                0.0,
+        'ot_gross':                0.0,
+        'dt_gross':                0.0,
+        'gross':                   0.0,
+        'fica':                    0.0,
+        'withholding':             0.0,
+        'deductions':              0.0,
+        'net':                     0.0,
+        'fringe_paid_cash':        0.0,
+        'fringe_plan_name':        '',
+        'fringe_plan_amount':      0.0,
+        'apprentice_program_name': '',
+        'apprentice_period':       0,
+        'apprentice_percent':      0.0,
+    }
+
+
+def _finalize_result(header, lines, compliance, parser_used, warnings):
+    """Build the standard output dict and run post-parse validation."""
+    # Ensure derived fields are consistent
+    for w in lines:
+        if w['st_rate'] > 0 and w['ot_rate'] == 0:
+            w['ot_rate'] = round(w['st_rate'] * 1.5, 2)
+        if w['st_rate'] > 0 and w['dt_rate'] == 0:
+            w['dt_rate'] = round(w['st_rate'] * 2.0, 2)
+        if w['rate'] == 0:
+            w['rate'] = w['st_rate']
+        # If deductions weren't explicitly set but FICA + withholding were, sum them
+        if w['deductions'] == 0 and (w['fica'] + w['withholding']) > 0:
+            w['deductions'] = round(w['fica'] + w['withholding'], 2)
+        # Recalculate net if it's 0 but gross and deductions are known
+        if w['net'] == 0 and w['gross'] > 0:
+            w['net'] = round(w['gross'] - w['deductions'], 2)
+
+    # Post-parse validation warnings
+    if not lines:
+        warnings.append(
+            "No worker rows were extracted. The PDF format may not be supported or the file may be image-based (scanned)."
+        )
+    else:
+        zero_gross = sum(1 for w in lines if w['gross'] == 0)
+        zero_hours = sum(1 for w in lines if w['total_hours'] == 0)
+        if zero_gross > len(lines) * 0.5:
+            warnings.append(
+                f"{zero_gross}/{len(lines)} workers have $0 gross — pay rate data may not have been extracted."
+            )
+        if zero_hours:
+            warnings.append(
+                f"{zero_hours} worker(s) have 0 total hours — hour data may be missing."
+            )
+        bad_totals = []
+        for w in lines:
+            computed = round(w['st_hours'] + w['ot_hours'] + w['dt_hours'], 2)
+            stated   = w['total_hours']
+            if stated > 0 and abs(computed - stated) > 0.5:
+                bad_totals.append(w['row_number'])
+        if bad_totals:
+            warnings.append(
+                f"Hour totals don't add up for row(s) {bad_totals[:5]} — ST+OT+DT != total hours."
+            )
+
+    journeymen  = sum(1 for w in lines if w.get('j_ra', '').upper() == 'J')
+    apprentices = sum(1 for w in lines if w.get('j_ra', '').upper() in ('RA', 'A'))
+
+    return {
+        'header':               header or _blank_header(),
+        'lines':                lines,
+        'totals': {
+            'workers':     len(lines),
+            'journeymen':  journeymen,
+            'apprentices': apprentices,
+            'total_gross': round(sum(w.get('gross', 0) for w in lines), 2),
+        },
+        'compliance_statement': compliance or _blank_compliance(),
+        'parser_used':          parser_used,
+        'parse_warnings':       warnings,
+    }
+
+
+# ---------------------------------------------------------------------------
+# FreeText annotation extractor (Jan 2025 DOL WH-347 form)
 # ---------------------------------------------------------------------------
 
 def _get_freetext_annotations(pdf_path):
-    """
-    Extracts all FreeText annotations from all pages of the PDF.
-    Returns a list of dicts: {page, x0, y0, x1, y1, content}
-    """
     from pdfminer.pdfdocument import PDFDocument
-    from pdfminer.pdfparser import PDFParser
-    from pdfminer.pdftypes import resolve1
-    from pdfminer.pdfpage import PDFPage
+    from pdfminer.pdfparser  import PDFParser
+    from pdfminer.pdftypes   import resolve1
+    from pdfminer.pdfpage    import PDFPage
 
     def decode(v):
         if isinstance(v, bytes):
@@ -24,49 +156,35 @@ def _get_freetext_annotations(pdf_path):
         return str(v) if v is not None else ''
 
     annotations = []
-
     with open(pdf_path, 'rb') as f:
         parser = PDFParser(f)
-        doc = PDFDocument(parser)
-
+        doc    = PDFDocument(parser)
         for page_num, page in enumerate(PDFPage.create_pages(doc), 1):
             if not page.annots:
                 continue
             annots_resolved = resolve1(page.annots)
             if not annots_resolved:
                 continue
-
             for annot_ref in annots_resolved:
                 annot = resolve1(annot_ref)
                 if not isinstance(annot, dict):
                     continue
-                subtype = decode(annot.get('Subtype', ''))
-                if 'FreeText' not in subtype:
+                if 'FreeText' not in decode(annot.get('Subtype', '')):
                     continue
                 contents = decode(annot.get('Contents', '')).strip()
                 if not contents:
                     continue
                 rect = annot.get('Rect', [0, 0, 0, 0])
                 try:
-                    rect = [float(v) for v in rect]
-                    x0, y0, x1, y1 = rect
+                    x0, y0, x1, y1 = [float(v) for v in rect]
                 except (TypeError, ValueError):
                     continue
-
-                annotations.append({
-                    'page': page_num,
-                    'x0': x0, 'y0': y0,
-                    'x1': x1, 'y1': y1,
-                    'content': contents,
-                })
-
+                annotations.append({'page': page_num, 'x0': x0, 'y0': y0,
+                                     'x1': x1, 'y1': y1, 'content': contents})
     return annotations
 
 
-# ---------------------------------------------------------------------------
-# X-coordinate column map for WH-347 worker rows (Jan 2025 DOL form)
-# Based on empirical measurement from wh347_test_complete.pdf
-# ---------------------------------------------------------------------------
+# X-coordinate column ranges for Jan 2025 DOL WH-347 form
 _WORKER_COL_RANGES = {
     'row_number':       (0,    66),
     'last_name':        (66,   118),
@@ -75,12 +193,11 @@ _WORKER_COL_RANGES = {
     'worker_id':        (193,  228),
     'j_ra':             (228,  260),
     'classification':   (260,  341),
-    # day-by-day hours sit between x=341-430; OT sub-row at x~405-430
-    'ot_hours_sub':     (400,  430),
-    'total_hours':      (430,  462),
+    'ot_hours_sub':     (395,  435),  # OT sub-row hours
+    'dt_hours_sub':     (435,  465),  # DT sub-row hours (if present)
+    'total_hours':      (430,  465),
     'st_rate':          (462,  503),
-    'fringe_credit':    (503,  530),
-    # x 530-597 not mapped (unused / always 0 in known forms)
+    'fringe_credit':    (503,  535),
     'gross':            (597,  637),
     'fica':             (637,  666),
     'withholding':      (666,  697),
@@ -88,276 +205,115 @@ _WORKER_COL_RANGES = {
     'net':              (727,  800),
 }
 
+# Tighter mapping: total_hours and dt_hours_sub overlap — resolve by y-band context
+_TOTAL_HOURS_RANGE = (430, 465)
+
 
 def _x_to_col(x0):
-    """Returns the field name for a given x0 coordinate, or None."""
     for col, (lo, hi) in _WORKER_COL_RANGES.items():
         if lo <= x0 < hi:
             return col
     return None
 
 
-def _safe_float(val):
-    try:
-        return float(str(val).replace(',', '').strip())
-    except (ValueError, TypeError):
-        return 0.0
-
-
-# ---------------------------------------------------------------------------
-# FreeText-based header extractor
-# ---------------------------------------------------------------------------
-
 def _extract_header_from_annotations(annots, page_num=1):
-    """
-    Extracts WH-347 form header from FreeText annotations on the given page.
+    """Single-pass header extractor using two y-bands (upper/lower)."""
+    header = _blank_header()
+    page_annots = [a for a in annots if a['page'] == page_num and a['y0'] > 350]
 
-    On the Jan 2025 DOL form (page 1):
-      Upper header band (y ~455-480):
-        x<200:       project name
-        200<x<342:   contract number
-        342<x<444:   payroll number
-        x>444:       contractor business name
-      Lower header band (y ~425-450):
-        x<200:       project location
-        200<x<342:   wage determination number
-        342<x<444:   week ending date
-        x>444:       contractor business address
-    """
-    header = {
-        'contractor_name':          '',
-        'contractor_address':       '',
-        'payroll_number':           '',
-        'week_ending':              '',
-        'project_name':             '',
-        'project_location':         '',
-        'contract_number':          '',
-        'wage_determination_number': '',
-    }
-
-    page_annots = [a for a in annots if a['page'] == page_num]
-
-    # Detect header y-band automatically: look for high-y FreeText blocks
-    # that are clearly above the worker rows (y0 > 350 typically)
-    header_annots = [a for a in page_annots if a['y0'] > 350]
-
-    if not header_annots:
-        # Fallback: use the two highest y-bands found
+    if not page_annots:
+        # Fallback: top 40pt of whatever is on the page
+        page_annots = [a for a in annots if a['page'] == page_num]
         if page_annots:
-            sorted_y = sorted({round(a['y0'] / 20) * 20 for a in page_annots}, reverse=True)
-            if sorted_y:
-                top_y = sorted_y[0] * 1.0
-                header_annots = [a for a in page_annots if a['y0'] >= top_y - 40]
+            max_y = max(a['y0'] for a in page_annots)
+            page_annots = [a for a in page_annots if a['y0'] >= max_y - 40]
 
-    for a in header_annots:
-        x0, y0 = a['x0'], a['y0']
-        val = a['content']
+    if not page_annots:
+        return header
 
-        # Use two y-bands based on relative position
-        # Upper band: higher y0 values
-        upper_band = any(
-            b['y0'] > y0 + 10 for b in header_annots
-        ) is False  # this is the topmost group
+    # Split into two bands by the median y value
+    ys = sorted({a['y0'] for a in page_annots}, reverse=True)
+    if len(ys) >= 2:
+        mid_y = ys[len(ys) // 2]
+    else:
+        mid_y = ys[0] - 1  # everything is upper
 
-        if x0 < 200:
-            if not header['project_name']:
-                header['project_name'] = val
-            elif not header['project_location']:
-                header['project_location'] = val
-        elif 200 <= x0 < 342:
-            if not header['contract_number']:
-                header['contract_number'] = val
-            elif not header['wage_determination_number']:
-                header['wage_determination_number'] = val
-        elif 342 <= x0 < 444:
-            # Payroll number or week ending
-            if re.match(r'^\d+$', val.strip()):
-                header['payroll_number'] = val.strip()
-            elif re.search(r'\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}', val):
-                header['week_ending'] = val.strip()
-            elif not header['payroll_number']:
-                header['payroll_number'] = val.strip()
-        elif x0 >= 444:
-            if not header['contractor_name']:
-                header['contractor_name'] = val
-            elif not header['contractor_address']:
-                header['contractor_address'] = val
+    upper = [a for a in page_annots if a['y0'] >= mid_y]
+    lower = [a for a in page_annots if a['y0'] <  mid_y]
 
-    # Second pass: try to split by y proximity (two y bands)
-    if header_annots:
-        y_values = sorted({a['y0'] for a in header_annots}, reverse=True)
-        if len(y_values) >= 2:
-            upper_y = y_values[0]
-            lower_y = next((y for y in y_values if upper_y - y > 10), upper_y - 30)
+    def assign_band(annots_band, is_upper):
+        for a in annots_band:
+            x0, val = a['x0'], a['content']
+            if x0 < 200:
+                key = 'project_name' if is_upper else 'project_location'
+            elif 200 <= x0 < 342:
+                key = 'contract_number' if is_upper else 'wage_determination_number'
+            elif 342 <= x0 < 444:
+                if is_upper:
+                    key = 'payroll_number'
+                else:
+                    key = 'week_ending' if re.search(r'\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}', val) else 'payroll_number'
+            else:
+                key = 'contractor_name' if is_upper else 'contractor_address'
+            if not header.get(key):
+                header[key] = val.strip()
 
-            upper = [a for a in header_annots if abs(a['y0'] - upper_y) < 10]
-            lower = [a for a in header_annots if abs(a['y0'] - lower_y) < 10]
-
-            for a in upper:
-                x0, val = a['x0'], a['content']
-                if x0 < 200:
-                    header['project_name'] = val
-                elif 200 <= x0 < 342:
-                    header['contract_number'] = val
-                elif 342 <= x0 < 444:
-                    if re.match(r'^\d+$', val.strip()):
-                        header['payroll_number'] = val.strip()
-                    else:
-                        header['payroll_number'] = val.strip()
-                elif x0 >= 444:
-                    header['contractor_name'] = val
-
-            for a in lower:
-                x0, val = a['x0'], a['content']
-                if x0 < 200:
-                    header['project_location'] = val
-                elif 200 <= x0 < 342:
-                    header['wage_determination_number'] = val
-                elif 342 <= x0 < 444:
-                    if re.search(r'\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}', val):
-                        header['week_ending'] = val.strip()
-                elif x0 >= 444:
-                    header['contractor_address'] = val
-
+    assign_band(upper, is_upper=True)
+    assign_band(lower, is_upper=False)
     return header
 
 
-# ---------------------------------------------------------------------------
-# FreeText-based compliance statement extractor
-# ---------------------------------------------------------------------------
-
 def _extract_compliance_from_annotations(annots, total_pages):
-    """
-    Extracts the Statement of Compliance fields from page 2 (or last page).
-    On the Jan 2025 form, page 2 contains:
-      - Project header (repeat)
-      - Certifying official name/title
-      - Signature name, date, phone, email (lowest y-values on page 2)
-    """
-    result = {
-        'certified_signature': False,
-        'certified_name': '',
-        'certified_title': '',
-        'certified_date': '',
-        'detected_by_text': False,
-    }
-
-    page2_annots = [a for a in annots if a['page'] == total_pages]
-    if not page2_annots:
-        # Try any page beyond page 1
-        other = [a for a in annots if a['page'] > 1]
-        if other:
-            page2_annots = other
-
-    if not page2_annots:
+    result = _blank_compliance()
+    page_annots = [a for a in annots if a['page'] == total_pages] or \
+                  [a for a in annots if a['page'] > 1]
+    if not page_annots:
         return result
 
-    # The certifying official name+title appears at mid-page in the header repeat
-    # The signature block appears at the bottom (lowest y values)
-    y_sorted = sorted(page2_annots, key=lambda a: a['y0'])
-    bottom_annots = y_sorted[:6]  # lowest 6 items = signature block
-
-    for a in bottom_annots:
+    # Bottom 6 annotations = signature block
+    for a in sorted(page_annots, key=lambda x: x['y0'])[:6]:
         val = a['content']
-        # Detect date
         if re.search(r'\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}', val):
-            result['certified_date'] = val.strip()
+            result['certified_date']      = val.strip()
             result['certified_signature'] = True
-            result['detected_by_text'] = True
-        # Detect phone
-        elif re.search(r'\(\d{3}\)\s*\d{3}[-.\s]\d{4}', val):
-            pass  # phone, not a signature field
-        # Detect email
-        elif '@' in val:
-            pass
-        # Name (first item without digits usually)
-        elif not result['certified_name'] and not any(c.isdigit() for c in val):
-            result['certified_name'] = val.strip()
-            result['certified_signature'] = True
-            result['detected_by_text'] = True
+            result['detected_by_text']    = True
+        elif '@' not in val and not re.search(r'\(\d{3}\)', val):
+            if not result['certified_name'] and len(val) > 2:
+                result['certified_name']      = val.strip()
+                result['certified_signature'] = True
+                result['detected_by_text']    = True
 
-    # Certifying official with title appears in a mid-page annotation (page 2)
-    mid_annots = [a for a in page2_annots if a['y0'] > 50]
-    for a in sorted(mid_annots, key=lambda a: -a['y0'])[:4]:
+    # Mid-page: "Name, Title" style certifying official
+    for a in sorted([a for a in page_annots if a['y0'] > 50], key=lambda x: -x['y0'])[:4]:
         val = a['content']
         if a['x0'] > 400 and ',' in val and not result['certified_title']:
-            # "James Holloway, Project Manager" style
             parts = val.split(',', 1)
             if len(parts) == 2:
-                result['certified_name'] = parts[0].strip()
+                result['certified_name']  = parts[0].strip()
                 result['certified_title'] = parts[1].strip()
                 result['certified_signature'] = True
-                result['detected_by_text'] = True
-
+                result['detected_by_text']    = True
     return result
 
 
-# ---------------------------------------------------------------------------
-# Worker row extractor from FreeText annotations
-# ---------------------------------------------------------------------------
-
 def _extract_workers_from_annotations(annots, page_num=1):
-    """
-    Groups FreeText annotations into worker rows by y-position,
-    then maps each annotation to a field using x-coordinate ranges.
-    """
     page_annots = [a for a in annots if a['page'] == page_num]
-
-    # Find row-number annotations (x < 66, numeric content)
-    row_markers = [
-        a for a in page_annots
-        if a['x0'] < 66 and re.match(r'^\d+$', a['content'].strip())
-    ]
-
+    row_markers = [a for a in page_annots
+                   if a['x0'] < 66 and re.match(r'^\d+$', a['content'].strip())]
     if not row_markers:
         return []
 
     workers = []
-
     for marker in row_markers:
-        row_num = int(marker['content'].strip())
-        row_y0 = marker['y0']
-        row_y1 = marker['y1']
-        # Collect all annotations within this row's y-band (+/- tolerance)
-        band_lo = row_y0 - 5
-        band_hi = row_y1 + 5
+        row_y0   = marker['y0']
+        row_y1   = marker['y1']
+        band_lo  = row_y0 - 5
+        band_hi  = row_y1 + 5
 
-        row_annots = [
-            a for a in page_annots
-            if a['y0'] >= band_lo and a['y1'] <= band_hi + 10
-        ]
+        row_annots = [a for a in page_annots
+                      if a['y0'] >= band_lo and a['y1'] <= band_hi + 10]
 
-        worker = {
-            'row_number':         row_num,
-            'last_name':          '',
-            'first_name':         '',
-            'middle_initial':     '',
-            'worker_id':          '',
-            'j_ra':               '',
-            'classification':     '',
-            'st_hours':           0.0,
-            'ot_hours':           0.0,
-            'dt_hours':           0.0,
-            'total_hours':        0.0,
-            'st_rate':            0.0,
-            'ot_rate':            0.0,
-            'dt_rate':            0.0,
-            'rate':               0.0,
-            'st_gross':           0.0,
-            'ot_gross':           0.0,
-            'dt_gross':           0.0,
-            'gross':              0.0,
-            'fica':               0.0,
-            'withholding':        0.0,
-            'deductions':         0.0,
-            'net':                0.0,
-            'fringe_paid_cash':   0.0,
-            'fringe_plan_name':   '',
-            'fringe_plan_amount': 0.0,
-            'apprentice_program_name': '',
-            'apprentice_period':  0,
-            'apprentice_percent': 0.0,
-        }
+        w = _blank_worker(int(marker['content'].strip()))
 
         for a in row_annots:
             col = _x_to_col(a['x0'])
@@ -365,383 +321,38 @@ def _extract_workers_from_annotations(annots, page_num=1):
                 continue
             val = a['content'].strip()
 
-            if col == 'row_number':
-                pass  # already set
-            elif col == 'last_name':
-                worker['last_name'] = val.title()
-            elif col == 'first_name':
-                worker['first_name'] = val.title()
-            elif col == 'middle_initial':
-                worker['middle_initial'] = val
-            elif col == 'worker_id':
-                worker['worker_id'] = val
-            elif col == 'j_ra':
-                worker['j_ra'] = val.upper()
-            elif col == 'classification':
-                worker['classification'] = val
-            elif col == 'ot_hours_sub':
-                worker['ot_hours'] = _safe_float(val)
-            elif col == 'total_hours':
-                worker['total_hours'] = _safe_float(val)
+            if   col == 'last_name':        w['last_name']       = val.title()
+            elif col == 'first_name':       w['first_name']      = val.title()
+            elif col == 'middle_initial':   w['middle_initial']  = val
+            elif col == 'worker_id':        w['worker_id']       = val
+            elif col == 'j_ra':             w['j_ra']            = val.upper()
+            elif col == 'classification':   w['classification']  = val
+            elif col == 'ot_hours_sub':     w['ot_hours']        = _safe_float(val)
+            elif col == 'dt_hours_sub':     w['dt_hours']        = _safe_float(val)
+            elif col == 'total_hours':      w['total_hours']     = _safe_float(val)
             elif col == 'st_rate':
-                worker['st_rate'] = _safe_float(val)
-                worker['rate'] = worker['st_rate']
-            elif col == 'fringe_credit':
-                worker['fringe_paid_cash'] = _safe_float(val)
-            elif col == 'gross':
-                worker['gross'] = _safe_float(val)
-            elif col == 'fica':
-                worker['fica'] = _safe_float(val)
-            elif col == 'withholding':
-                worker['withholding'] = _safe_float(val)
-            elif col == 'total_deductions':
-                worker['deductions'] = _safe_float(val)
-            elif col == 'net':
-                worker['net'] = _safe_float(val)
+                w['st_rate'] = _safe_float(val)
+                w['rate']    = w['st_rate']
+            elif col == 'fringe_credit':    w['fringe_paid_cash']= _safe_float(val)
+            elif col == 'gross':            w['gross']           = _safe_float(val)
+            elif col == 'fica':             w['fica']            = _safe_float(val)
+            elif col == 'withholding':      w['withholding']     = _safe_float(val)
+            elif col == 'total_deductions': w['deductions']      = _safe_float(val)
+            elif col == 'net':              w['net']             = _safe_float(val)
 
-        # Derive ST hours and rates
-        worker['st_hours'] = round(worker['total_hours'] - worker['ot_hours'], 2)
-        if worker['st_hours'] < 0:
-            worker['st_hours'] = 0.0
+        # Derive ST hours
+        w['st_hours'] = max(round(w['total_hours'] - w['ot_hours'] - w['dt_hours'], 2), 0.0)
 
-        # Compute OT rate
-        if worker['st_rate'] > 0:
-            worker['ot_rate'] = round(worker['st_rate'] * 1.5, 2)
-            worker['dt_rate'] = round(worker['st_rate'] * 2.0, 2)
+        # Gross components
+        if w['st_rate'] > 0:
+            w['ot_rate']  = round(w['st_rate'] * 1.5, 2)
+            w['dt_rate']  = round(w['st_rate'] * 2.0, 2)
+            w['st_gross'] = round(w['st_hours'] * w['st_rate'],  2)
+            w['ot_gross'] = round(w['ot_hours'] * w['ot_rate'],  2)
+            w['dt_gross'] = round(w['dt_hours'] * w['dt_rate'],  2)
 
-        # Estimate ST/OT gross components
-        worker['st_gross'] = round(worker['st_hours'] * worker['st_rate'], 2)
-        worker['ot_gross'] = round(worker['ot_hours'] * worker['ot_rate'], 2)
-
-        workers.append(worker)
-
+        workers.append(w)
     return workers
-
-
-# ---------------------------------------------------------------------------
-# Legacy text-based header extractor (fallback for non-annotation PDFs)
-# ---------------------------------------------------------------------------
-
-def extract_wh347_header(pdf_path):
-    header = {
-        'contractor_name':          '',
-        'contractor_address':       '',
-        'payroll_number':           '',
-        'week_ending':              '',
-        'project_name':             '',
-        'project_location':         '',
-        'contract_number':          '',
-        'wage_determination_number': '',
-    }
-
-    with pdfplumber.open(pdf_path) as pdf:
-        if not pdf.pages:
-            return header
-        page = pdf.pages[0]
-        height = page.height
-        header_region = page.crop((0, 0, page.width, min(200, height * 0.35)))
-        text = header_region.extract_text() or ''
-        full_text = page.extract_text() or ''
-        search_text = text + '\n' + full_text
-
-    def find_value(pattern, text, group=1, default=''):
-        m = re.search(pattern, text, re.IGNORECASE)
-        return m.group(group).strip() if m else default
-
-    header['contractor_name'] = find_value(
-        r'Contractor[:\s]+([A-Za-z0-9\s&,\.\-\']+?)(?:\n|Address|$)', search_text)
-    header['contractor_address'] = find_value(r'Address[:\s]+([^\n]+)', search_text)
-    header['payroll_number'] = find_value(
-        r'Payroll\s*(?:No\.?|Number)[:\s#]*(\d+)', search_text)
-    header['week_ending'] = find_value(
-        r'Week\s*Ending[:\s]+(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})', search_text)
-    header['project_name'] = find_value(
-        r'Project\s*(?:and\s*Location|Name)?[:\s]+([^\n]+)', search_text)
-    header['contract_number'] = find_value(
-        r'Contract\s*(?:No\.?|Number)[:\s]+([A-Z0-9\-]+)', search_text)
-    header['wage_determination_number'] = find_value(
-        r'Wage\s*Det(?:ermination)?[:\s#.]*([A-Z]{2}\d{7,})', search_text)
-
-    return header
-
-
-def extract_compliance_statement(pdf_path):
-    result = {
-        'certified_signature': False,
-        'certified_name':      '',
-        'certified_title':     '',
-        'certified_date':      '',
-        'detected_by_text':    False,
-    }
-
-    with pdfplumber.open(pdf_path) as pdf:
-        if not pdf.pages:
-            return result
-        last_page = pdf.pages[-1]
-        text = last_page.extract_text() or ''
-        search_text = text
-        if len(pdf.pages) == 1:
-            search_text = (pdf.pages[0].extract_text() or '')
-
-    cert_keywords = ['certify', 'penalties of perjury', 'statement of compliance',
-                     'willful falsification', 'i, the undersigned']
-    if any(kw in search_text.lower() for kw in cert_keywords):
-        result['detected_by_text'] = True
-        name_m = re.search(
-            r'(?:Signature|Signed|Name)[:\s]+([A-Za-z\s\.\-\']{3,50}?)(?:\n|Title|Date)',
-            search_text, re.IGNORECASE)
-        if name_m:
-            result['certified_name'] = name_m.group(1).strip()
-            result['certified_signature'] = True
-        date_m = re.search(
-            r'Date[:\s]+(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})',
-            search_text, re.IGNORECASE)
-        if date_m:
-            result['certified_date'] = date_m.group(1).strip()
-            result['certified_signature'] = True
-
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Simple 10-column custom WH-347 format
-# (2-col header table + 10-col worker table per page)
-# ---------------------------------------------------------------------------
-
-def _is_simple10_format(pdf_path):
-    """
-    Returns True if the PDF uses the simple 10-col custom format:
-      Page 1 has a 2-col key-value header table followed by a 10-col worker table.
-    """
-    with pdfplumber.open(pdf_path) as pdf:
-        if not pdf.pages:
-            return False
-        tables = pdf.pages[0].extract_tables()
-        if len(tables) < 2:
-            return False
-        # First table: 2 cols, first cell is a label ending with ':'
-        t0 = tables[0]
-        if not t0 or not t0[0] or len(t0[0]) != 2:
-            return False
-        cell = str(t0[0][0] or '').strip()
-        if ':' not in cell:
-            return False
-        # Second table: exactly 10 cols with numeric first column on data rows
-        t1 = tables[1]
-        if not t1 or not t1[0] or len(t1[0]) != 10:
-            return False
-        return True
-
-
-def _extract_simple10_data(pdf_path):
-    """
-    Parses the simple 10-column custom WH-347 format.
-
-    Page 1 Table 0 (2-col): key-value header pairs
-    Pages 1-N Table 1 (10-col): worker rows
-      [0]=row#  [1]=name(Last, First)  [2]=classification
-      [3]=ST hrs  [4]=OT hrs  [5]=total hrs  [6]=ST rate
-      [7]=gross  [8]=deductions  [9]=net
-    Last page: 2-col compliance statement table
-    """
-
-    def sf(val):
-        try:
-            return float(re.sub(r'[\s,]', '', str(val or '')))
-        except (ValueError, TypeError):
-            return 0.0
-
-    def cl(val):
-        if val is None:
-            return ''
-        return re.sub(r'\s+', ' ', str(val)).strip()
-
-    header = {
-        'contractor_name':           '',
-        'contractor_address':        '',
-        'payroll_number':            '',
-        'week_ending':               '',
-        'project_name':              '',
-        'project_location':          '',
-        'contract_number':           '',
-        'wage_determination_number': '',
-    }
-    compliance_statement = {
-        'certified_signature': False,
-        'certified_name':      '',
-        'certified_title':     '',
-        'certified_date':      '',
-        'detected_by_text':    False,
-    }
-
-    # Map 2-col label → header field
-    LABEL_MAP = {
-        'project name':           'project_name',
-        'project no':             'contract_number',
-        'contract no':            'contract_number',
-        'certified payroll no':   'payroll_number',
-        'payroll no':             'payroll_number',
-        'prime contractor':       'contractor_name',
-        'contractor':             'contractor_name',
-        'project location':       'project_location',
-        'location':               'project_location',
-        'wage determination no':  'wage_determination_number',
-        'wage det no':            'wage_determination_number',
-        'week ending date':       'week_ending',
-        'week ending':            'week_ending',
-        'address':                'contractor_address',
-    }
-    COMPLIANCE_MAP = {
-        'certifying official': ('certified_name', 'certified_title'),
-        'date':                ('certified_date', None),
-    }
-
-    parsed_rows = []
-
-    with pdfplumber.open(pdf_path) as pdf:
-        for page_num, page in enumerate(pdf.pages, 1):
-            tables = page.extract_tables()
-
-            for table in tables:
-                if not table or not table[0]:
-                    continue
-                num_cols = len(table[0])
-
-                # ----------------------------------------------------------
-                # 2-column table: header or compliance key-value pairs
-                # ----------------------------------------------------------
-                if num_cols == 2:
-                    for row in table:
-                        if not row or len(row) < 2:
-                            continue
-                        label = cl(row[0]).rstrip(':').lower()
-                        value = cl(row[1])
-                        if not value:
-                            continue
-
-                        # Header fields
-                        for key, field in LABEL_MAP.items():
-                            if label.startswith(key):
-                                if not header[field]:
-                                    header[field] = value
-                                break
-
-                        # Compliance fields
-                        if label.startswith('certifying official'):
-                            # May be "Name — Title" or "Name, Title"
-                            for sep in ['\u2013', '\u2014', '/', ',']:
-                                if sep in value:
-                                    parts = [p.strip() for p in value.split(sep, 1)]
-                                    compliance_statement['certified_name']  = parts[0]
-                                    compliance_statement['certified_title'] = parts[1] if len(parts) > 1 else ''
-                                    break
-                            else:
-                                compliance_statement['certified_name'] = value
-                            compliance_statement['certified_signature'] = True
-                            compliance_statement['detected_by_text']    = True
-
-                        elif label == 'date':
-                            if re.search(r'\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}', value):
-                                compliance_statement['certified_date']      = value
-                                compliance_statement['certified_signature'] = True
-                                compliance_statement['detected_by_text']    = True
-
-                # ----------------------------------------------------------
-                # 10-column table: worker data rows
-                # ----------------------------------------------------------
-                elif num_cols == 10:
-                    for row in table:
-                        if not row:
-                            continue
-                        cell0 = cl(row[0])
-                        # Skip header rows (non-numeric first cell)
-                        if not cell0.isdigit():
-                            continue
-
-                        row_number     = int(cell0)
-                        full_name      = cl(row[1])
-                        classification = cl(row[2])
-                        st_hours       = sf(row[3])
-                        ot_hours       = sf(row[4])
-                        total_hours    = sf(row[5])
-                        st_rate        = sf(row[6])
-                        gross          = sf(row[7])
-                        deductions     = sf(row[8])
-                        net            = sf(row[9])
-
-                        # Parse "Last, First" name
-                        if ',' in full_name:
-                            parts = full_name.split(',', 1)
-                            last_name  = parts[0].strip().title()
-                            first_name = parts[1].strip().title()
-                        else:
-                            name_parts = full_name.split()
-                            last_name  = name_parts[-1].title() if name_parts else full_name
-                            first_name = ' '.join(name_parts[:-1]).title() if len(name_parts) > 1 else ''
-
-                        # Determine J/RA from classification
-                        cls_upper = classification.upper()
-                        if 'APPRENTICE' in cls_upper or '(RA)' in cls_upper:
-                            j_ra = 'RA'
-                        else:
-                            j_ra = 'J'
-
-                        # Compute rates
-                        ot_rate = round(st_rate * 1.5, 2)
-                        dt_rate = round(st_rate * 2.0, 2)
-                        dt_hours = round(max(total_hours - st_hours - ot_hours, 0.0), 2)
-
-                        # Compute gross components
-                        ot_gross  = round(ot_hours * ot_rate, 2)
-                        dt_gross  = round(dt_hours * dt_rate, 2)
-                        st_gross  = round(max(gross - ot_gross - dt_gross, 0.0), 2)
-
-                        parsed_rows.append({
-                            'row_number':              row_number,
-                            'last_name':               last_name,
-                            'first_name':              first_name,
-                            'middle_initial':           '',
-                            'worker_id':               '',
-                            'j_ra':                    j_ra,
-                            'classification':          classification,
-                            'st_hours':                st_hours,
-                            'ot_hours':                ot_hours,
-                            'dt_hours':                dt_hours,
-                            'total_hours':             total_hours,
-                            'st_rate':                 st_rate,
-                            'ot_rate':                 ot_rate,
-                            'dt_rate':                 dt_rate,
-                            'rate':                    st_rate,
-                            'st_gross':                st_gross,
-                            'ot_gross':                ot_gross,
-                            'dt_gross':                dt_gross,
-                            'gross':                   gross,
-                            'fica':                    0.0,
-                            'withholding':             0.0,
-                            'deductions':              deductions,
-                            'net':                     net,
-                            'fringe_paid_cash':        0.0,
-                            'fringe_plan_name':        '',
-                            'fringe_plan_amount':      0.0,
-                            'apprentice_program_name': '',
-                            'apprentice_period':       0,
-                            'apprentice_percent':      0.0,
-                        })
-
-    journeymen  = sum(1 for w in parsed_rows if w['j_ra'] == 'J')
-    apprentices = sum(1 for w in parsed_rows if w['j_ra'] == 'RA')
-
-    return {
-        'header':  header,
-        'lines':   parsed_rows,
-        'totals': {
-            'workers':     len(parsed_rows),
-            'journeymen':  journeymen,
-            'apprentices': apprentices,
-            'total_gross': round(sum(w['gross'] for w in parsed_rows), 2),
-        },
-        'compliance_statement': compliance_statement,
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -749,72 +360,23 @@ def _extract_simple10_data(pdf_path):
 # ---------------------------------------------------------------------------
 
 def _is_itextsharp_format(pdf_path):
-    """Returns True if the PDF uses the iTextSharp WH-347 format."""
     with pdfplumber.open(pdf_path) as pdf:
         if not pdf.pages:
             return False
         tables = pdf.pages[0].extract_tables()
         if not tables or not tables[0] or not tables[0][0]:
             return False
-        num_cols = len(tables[0][0])
-        if num_cols < 26:
-            return False
-        first_cell = str(tables[0][0][0] or '').strip().upper()
-        return 'PROJECT NAME' in first_cell
+        num_cols  = len(tables[0][0])
+        first_row = ' '.join(_clean(c) for c in tables[0][0] if c).upper()
+        return num_cols >= 26 and ('PROJECT NAME' in first_row or 'CONTRACT NO' in first_row)
 
 
 def _extract_itextsharp_data(pdf_path):
-    """
-    Parses iTextSharp-generated multi-page WH-347 format.
-
-    Page 1: 27 cols — has extra blank col at [5]; header in rows 0-3.
-    Pages 2+: 26 cols — no extra blank; column headers in rows 0-5.
-    Compliance statement: 5-col table on a later page with signature block.
-
-    Column mapping for 27-col (offset +1 vs 26-col after [4]):
-      [0]=row#  [1]=last  [2]=first  [3]=MI  [4]=worker_id
-      [5]=BLANK  [6]=J/RA  [7]=classification  [8]=type(ST/OT/DT)
-      [9-15]=daily hours  [16]=total_hours  [17]=rate
-      [18]=fringe_credit  [19]=fringe_lieu  [20]=weekly_gross
-      [21]=cumul_gross  [22]=withholding  [23]=FICA
-      [24]=other_ded  [25]=total_ded  [26]=net
-
-    For 26-col pages, shift all indexes >= 6 down by 1.
-    """
-
-    def sf(val):
-        try:
-            # Remove commas and ALL whitespace (pdfplumber sometimes wraps "17.50" as "17.5\n0")
-            cleaned = re.sub(r'[\s,]', '', str(val or ''))
-            return float(cleaned)
-        except (ValueError, TypeError):
-            return 0.0
-
-    def cl(val):
-        if val is None:
-            return ''
-        return re.sub(r'\s+', ' ', str(val)).strip()
-
-    header = {
-        'contractor_name':           '',
-        'contractor_address':        '',
-        'payroll_number':            '',
-        'week_ending':               '',
-        'project_name':              '',
-        'project_location':          '',
-        'contract_number':           '',
-        'wage_determination_number': '',
-    }
-    compliance_statement = {
-        'certified_signature': False,
-        'certified_name':      '',
-        'certified_title':     '',
-        'certified_date':      '',
-        'detected_by_text':    False,
-    }
-
-    all_workers = {}   # row_num (int) -> worker dict
-    last_row_num = 0
+    header     = _blank_header()
+    compliance = _blank_compliance()
+    warnings   = []
+    all_workers    = {}
+    last_row_num   = 0
     header_extracted = False
 
     with pdfplumber.open(pdf_path) as pdf:
@@ -830,222 +392,549 @@ def _extract_itextsharp_data(pdf_path):
                 if not row:
                     continue
                 row_len = len(row)
-                cell0 = cl(row[0])
+                cell0   = _clean(row[0])
 
-                # ----------------------------------------------------------
-                # Header extraction (page with 27-col PROJECT NAME table)
-                # ----------------------------------------------------------
-                if not header_extracted and row_len >= 27 and 'PROJECT NAME' in cell0.upper():
-                    # Values row is row_idx + 1
+                # Header row
+                if not header_extracted and row_len >= 26 and (
+                        'PROJECT NAME' in cell0.upper() or 'CONTRACT NO' in cell0.upper()):
                     if row_idx + 1 < len(table):
                         v1 = table[row_idx + 1]
-                        header['project_name']   = cl(v1[0])  if len(v1) > 0  else ''
-                        header['contract_number']= cl(v1[5])  if len(v1) > 5  else ''
-                        header['payroll_number'] = cl(v1[9])  if len(v1) > 9  else ''
-                        header['contractor_name']= cl(v1[16]) if len(v1) > 16 else ''
-                    # Location/wage-det row is row_idx + 2 (label) and + 3 (value)
+                        header['project_name']    = _clean(v1[0])  if len(v1) > 0  else ''
+                        header['contract_number'] = _clean(v1[5])  if len(v1) > 5  else ''
+                        header['payroll_number']  = _clean(v1[9])  if len(v1) > 9  else ''
+                        header['contractor_name'] = _clean(v1[16]) if len(v1) > 16 else ''
                     if row_idx + 3 < len(table):
                         v3 = table[row_idx + 3]
-                        header['project_location']          = cl(v3[0])  if len(v3) > 0  else ''
-                        header['wage_determination_number'] = cl(v3[5])  if len(v3) > 5  else ''
-                        header['week_ending']               = cl(v3[9])  if len(v3) > 9  else ''
-                        header['contractor_address']        = cl(v3[16]) if len(v3) > 16 else ''
+                        header['project_location']          = _clean(v3[0])  if len(v3) > 0  else ''
+                        header['wage_determination_number'] = _clean(v3[5])  if len(v3) > 5  else ''
+                        header['week_ending']               = _clean(v3[9])  if len(v3) > 9  else ''
+                        header['contractor_address']        = _clean(v3[16]) if len(v3) > 16 else ''
                     header_extracted = True
                     continue
 
-                # ----------------------------------------------------------
-                # Signature block (5-col: name | None | date | phone | email)
-                # Also scan for certifying official name/title in any cell
-                # ----------------------------------------------------------
+                # Signature block
                 if 'SIGNATURE OF CERTIFYING OFFICIAL' in cell0.upper() and row_idx + 1 < len(table):
                     sig = table[row_idx + 1]
-                    name_val = cl(sig[0]) if sig else ''
-                    date_val = cl(sig[2]) if len(sig) > 2 else ''
+                    name_val = _clean(sig[0]) if sig else ''
+                    date_val = _clean(sig[2]) if len(sig) > 2 else ''
                     if name_val:
-                        compliance_statement['certified_name'] = name_val
+                        compliance['certified_name'] = name_val
                     if re.search(r'\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}', date_val):
-                        compliance_statement['certified_date']      = date_val
-                        compliance_statement['certified_signature'] = True
-                        compliance_statement['detected_by_text']    = True
+                        compliance['certified_date']      = date_val
+                        compliance['certified_signature'] = True
+                        compliance['detected_by_text']    = True
                     continue
 
-                # Certifying official name/title: scan label row for 'CERTIFYING OFFICIAL'
-                # then read the value from the same column in the next row.
-                # (e.g. page 4: label at col 21, value 'Mary Mead / Payroll Manager' at col 21)
-                if not compliance_statement['certified_title']:
+                # Certifying official name/title
+                if not compliance['certified_title']:
                     for ci, cv in enumerate(row):
                         if cv and 'CERTIFYING OFFICIAL' in str(cv).upper():
                             if row_idx + 1 < len(table) and ci < len(table[row_idx + 1]):
-                                name_title = cl(table[row_idx + 1][ci])
-                                if name_title and '/' in name_title:
-                                    parts = [p.strip() for p in name_title.split('/')]
-                                    if len(parts) >= 2 and parts[0] and parts[1]:
-                                        compliance_statement['certified_name'] = (
-                                            compliance_statement['certified_name'] or parts[0]
-                                        )
-                                        compliance_statement['certified_title'] = parts[1]
+                                nt = _clean(table[row_idx + 1][ci])
+                                if nt and '/' in nt:
+                                    parts = [p.strip() for p in nt.split('/')]
+                                    if len(parts) >= 2:
+                                        compliance['certified_name']  = compliance['certified_name'] or parts[0]
+                                        compliance['certified_title'] = parts[1]
                             break
 
-                # ----------------------------------------------------------
-                # Worker data rows
-                # Determine column offsets by row width
-                # ----------------------------------------------------------
+                # Column offsets by row width
                 if row_len >= 27:
-                    # 27-col page-1 layout
-                    j_ra_col    = 6
-                    cls_col     = 7
-                    type_col    = 8
-                    day_start   = 9
-                    day_end     = 16   # exclusive (7 cols: 9-15)
-                    total_h_col = 16
-                    rate_col    = 17
-                    fringe_c_col= 18
-                    cumul_g_col = 21
-                    week_g_col  = 20
-                    withhold_col= 22
-                    fica_col    = 23
-                    other_d_col = 24
-                    total_d_col = 25
-                    net_col     = 26
+                    j_ra_col=6; cls_col=7; type_col=8; day_start=9; day_end=16
+                    total_h=16; rate_c=17; fringe_c=18; week_g=20; cumul_g=21
+                    withhold=22; fica_c=23; other_d=24; total_d=25; net_c=26
                 elif row_len >= 26:
-                    # 26-col pages-2+ layout (no extra blank)
-                    j_ra_col    = 5
-                    cls_col     = 6
-                    type_col    = 7
-                    day_start   = 8
-                    day_end     = 15   # exclusive (7 cols: 8-14)
-                    total_h_col = 15
-                    rate_col    = 16
-                    fringe_c_col= 17
-                    cumul_g_col = 20
-                    week_g_col  = 19
-                    withhold_col= 21
-                    fica_col    = 22
-                    other_d_col = 23
-                    total_d_col = 24
-                    net_col     = 25
+                    j_ra_col=5; cls_col=6; type_col=7; day_start=8; day_end=15
+                    total_h=15; rate_c=16; fringe_c=17; week_g=19; cumul_g=20
+                    withhold=21; fica_c=22; other_d=23; total_d=24; net_c=25
                 else:
                     continue
 
-                row_type = cl(row[type_col]).upper() if type_col < row_len else ''
+                row_type   = _clean(row[type_col]).upper() if type_col < row_len else ''
                 is_primary = bool(cell0 and cell0.isdigit())
 
-                # Skip non-data rows (header labels, date rows, blank rows, etc.)
                 if not is_primary and row_type not in ('ST', 'OT', 'DT'):
                     continue
 
-                # Determine current row number
-                if is_primary and cell0.isdigit():
+                if is_primary:
                     last_row_num = int(cell0)
                 if last_row_num == 0:
                     continue
                 rn = last_row_num
 
-                # Compute daily hours sum for this sub-row
-                daily_hours = sum(sf(row[i]) for i in range(day_start, day_end) if i < row_len)
-                rate = sf(row[rate_col]) if rate_col < row_len else 0.0
+                daily_hours = sum(_safe_float(row[i]) for i in range(day_start, day_end) if i < row_len)
+                rate        = _safe_float(row[rate_c]) if rate_c < row_len else 0.0
 
-                # Initialize worker record if needed
                 if rn not in all_workers:
-                    all_workers[rn] = {
-                        'row_number':              rn,
-                        'last_name':               '',
-                        'first_name':              '',
-                        'middle_initial':          '',
-                        'worker_id':               '',
-                        'j_ra':                    '',
-                        'classification':          '',
-                        'st_hours':                0.0,
-                        'ot_hours':                0.0,
-                        'dt_hours':                0.0,
-                        'total_hours':             0.0,
-                        'st_rate':                 0.0,
-                        'ot_rate':                 0.0,
-                        'dt_rate':                 0.0,
-                        'rate':                    0.0,
-                        'st_gross':                0.0,
-                        'ot_gross':                0.0,
-                        'dt_gross':                0.0,
-                        'gross':                   0.0,
-                        'fica':                    0.0,
-                        'withholding':             0.0,
-                        'other_deductions':        0.0,
-                        'deductions':              0.0,
-                        'net':                     0.0,
-                        'cumul_gross':             0.0,
-                        'cumul_deductions':        0.0,
-                        'cumul_net':               0.0,
-                        'fringe_paid_cash':        0.0,
-                        'fringe_plan_name':        '',
-                        'fringe_plan_amount':      0.0,
-                        'apprentice_program_name': '',
-                        'apprentice_period':       0,
-                        'apprentice_percent':      0.0,
-                    }
+                    all_workers[rn] = _blank_worker(rn)
 
                 w = all_workers[rn]
 
-                # Fill identity fields from the primary (ST) row
                 if is_primary:
-                    w['last_name']       = cl(row[1]).title()
-                    w['first_name']      = cl(row[2]).title()
-                    w['middle_initial']  = cl(row[3])
-                    w['worker_id']       = cl(row[4])
-                    w['j_ra']            = cl(row[j_ra_col]).upper()
-                    w['classification']  = cl(row[cls_col])
-                    # Total hours shown on ST row = weekly total (all types)
-                    w['total_hours']     = sf(row[total_h_col]) if total_h_col < row_len else 0.0
-                    # Weekly gross (all types combined) — shown on ST row only
-                    w['gross']           = sf(row[week_g_col])  if week_g_col  < row_len else 0.0
-                    # Fringe credit
-                    w['fringe_paid_cash']= sf(row[fringe_c_col]) if fringe_c_col < row_len else 0.0
-                    # Deductions on this form are cumulative (YTD), not weekly.
-                    # Set deductions=0 and net=gross so math audit check #2 passes
-                    # without spurious failures. Store all deduction fields for reporting.
-                    w['withholding']     = sf(row[withhold_col]) if withhold_col < row_len else 0.0
-                    w['fica']            = sf(row[fica_col])     if fica_col     < row_len else 0.0
-                    w['other_deductions']= sf(row[other_d_col])  if other_d_col  < row_len else 0.0
-                    w['cumul_gross']     = sf(row[cumul_g_col])  if cumul_g_col  < row_len else 0.0
-                    w['cumul_deductions']= sf(row[total_d_col])  if total_d_col  < row_len else 0.0
-                    w['cumul_net']       = sf(row[net_col])      if net_col      < row_len else 0.0
-                    w['deductions']      = 0.0
-                    w['net']             = w['gross']
+                    w['last_name']      = _clean(row[1]).title()
+                    w['first_name']     = _clean(row[2]).title()
+                    w['middle_initial'] = _clean(row[3])
+                    w['worker_id']      = _clean(row[4])
+                    w['j_ra']           = _clean(row[j_ra_col]).upper()
+                    w['classification'] = _clean(row[cls_col])
+                    w['total_hours']    = _safe_float(row[total_h])  if total_h  < row_len else 0.0
+                    w['gross']          = _safe_float(row[week_g])   if week_g   < row_len else 0.0
+                    w['fringe_paid_cash']= _safe_float(row[fringe_c]) if fringe_c < row_len else 0.0
+                    w['withholding']    = _safe_float(row[withhold]) if withhold < row_len else 0.0
+                    w['fica']           = _safe_float(row[fica_c])   if fica_c   < row_len else 0.0
+                    w['deductions']     = _safe_float(row[total_d])  if total_d  < row_len else 0.0
+                    w['net']            = _safe_float(row[net_c])    if net_c    < row_len else 0.0
 
-                # Per-type hours and rates
-                if row_type == 'ST':
-                    w['st_hours'] = daily_hours
-                    w['st_rate']  = rate
-                    w['rate']     = rate
+                if   row_type == 'ST':
+                    w['st_hours'] = daily_hours; w['st_rate'] = rate; w['rate'] = rate
                     w['st_gross'] = round(daily_hours * rate, 2)
                 elif row_type == 'OT':
-                    w['ot_hours'] = daily_hours
-                    w['ot_rate']  = rate
+                    w['ot_hours'] = daily_hours; w['ot_rate'] = rate
                     w['ot_gross'] = round(daily_hours * rate, 2)
                 elif row_type == 'DT':
-                    w['dt_hours'] = daily_hours
-                    w['dt_rate']  = rate
+                    w['dt_hours'] = daily_hours; w['dt_rate'] = rate
                     w['dt_gross'] = round(daily_hours * rate, 2)
 
-    # If certifying name found but no date, still mark as having a compliance statement
-    if compliance_statement['certified_name'] and not compliance_statement['certified_date']:
-        compliance_statement['certified_signature'] = True
-        compliance_statement['detected_by_text']    = True
+    if compliance['certified_name'] and not compliance['certified_date']:
+        compliance['certified_signature'] = True
+        compliance['detected_by_text']    = True
 
-    parsed_rows = [all_workers[k] for k in sorted(all_workers.keys())]
-    journeymen  = sum(1 for w in parsed_rows if w.get('j_ra', '').upper() == 'J')
-    apprentices = sum(1 for w in parsed_rows if w.get('j_ra', '').upper() in ('RA', 'A'))
+    rows = [all_workers[k] for k in sorted(all_workers)]
+    return _finalize_result(header, rows, compliance, 'itextsharp', warnings)
 
-    return {
-        'header':  header,
-        'lines':   parsed_rows,
-        'totals': {
-            'workers':     len(parsed_rows),
-            'journeymen':  journeymen,
-            'apprentices': apprentices,
-            'total_gross': round(sum(w.get('gross', 0) for w in parsed_rows), 2),
-        },
-        'compliance_statement': compliance_statement,
+
+# ---------------------------------------------------------------------------
+# Simple 10-column custom WH-347 format
+# ---------------------------------------------------------------------------
+
+def _is_simple10_format(pdf_path):
+    with pdfplumber.open(pdf_path) as pdf:
+        if not pdf.pages:
+            return False
+        tables = pdf.pages[0].extract_tables()
+        if len(tables) < 2:
+            return False
+        t0 = tables[0]
+        if not t0 or not t0[0] or len(t0[0]) != 2:
+            return False
+        if ':' not in str(t0[0][0] or ''):
+            return False
+        t1 = tables[1]
+        return bool(t1 and t1[0] and len(t1[0]) == 10)
+
+
+def _extract_simple10_data(pdf_path):
+    header     = _blank_header()
+    compliance = _blank_compliance()
+    warnings   = []
+
+    LABEL_MAP = {
+        'project name':          'project_name',
+        'project no':            'contract_number',
+        'contract no':           'contract_number',
+        'certified payroll no':  'payroll_number',
+        'payroll no':            'payroll_number',
+        'prime contractor':      'contractor_name',
+        'contractor':            'contractor_name',
+        'project location':      'project_location',
+        'location':              'project_location',
+        'wage determination no': 'wage_determination_number',
+        'wage det no':           'wage_determination_number',
+        'week ending date':      'week_ending',
+        'week ending':           'week_ending',
+        'address':               'contractor_address',
     }
+
+    parsed_rows = []
+
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            for table in page.extract_tables() or []:
+                if not table or not table[0]:
+                    continue
+                num_cols = len(table[0])
+
+                if num_cols == 2:
+                    for row in table:
+                        if not row or len(row) < 2:
+                            continue
+                        label = _clean(row[0]).rstrip(':').lower()
+                        value = _clean(row[1])
+                        if not value:
+                            continue
+                        for key, field in LABEL_MAP.items():
+                            if label.startswith(key):
+                                if not header[field]:
+                                    header[field] = value
+                                break
+                        if label.startswith('certifying official'):
+                            for sep in ['–', '—', '/', ',']:
+                                if sep in value:
+                                    parts = [p.strip() for p in value.split(sep, 1)]
+                                    compliance['certified_name']  = parts[0]
+                                    compliance['certified_title'] = parts[1] if len(parts) > 1 else ''
+                                    break
+                            else:
+                                compliance['certified_name'] = value
+                            compliance['certified_signature'] = True
+                            compliance['detected_by_text']    = True
+                        elif label == 'date' and re.search(r'\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}', value):
+                            compliance['certified_date']      = value
+                            compliance['certified_signature'] = True
+                            compliance['detected_by_text']    = True
+
+                elif num_cols == 10:
+                    for row in table:
+                        if not row:
+                            continue
+                        cell0 = _clean(row[0])
+                        if not cell0.isdigit():
+                            continue
+
+                        full_name = _clean(row[1])
+                        if ',' in full_name:
+                            parts      = full_name.split(',', 1)
+                            last_name  = parts[0].strip().title()
+                            first_name = parts[1].strip().title()
+                        else:
+                            nm         = full_name.split()
+                            last_name  = nm[-1].title()  if nm else ''
+                            first_name = ' '.join(nm[:-1]).title() if len(nm) > 1 else ''
+
+                        classification = _clean(row[2])
+                        st_hours  = _safe_float(row[3])
+                        ot_hours  = _safe_float(row[4])
+                        total_h   = _safe_float(row[5])
+                        st_rate   = _safe_float(row[6])
+                        gross     = _safe_float(row[7])
+                        deductions= _safe_float(row[8])
+                        net       = _safe_float(row[9])
+
+                        ot_rate  = round(st_rate * 1.5, 2)
+                        dt_rate  = round(st_rate * 2.0, 2)
+                        dt_hours = round(max(total_h - st_hours - ot_hours, 0.0), 2)
+                        ot_gross = round(ot_hours * ot_rate, 2)
+                        dt_gross = round(dt_hours * dt_rate, 2)
+                        st_gross = round(max(gross - ot_gross - dt_gross, 0.0), 2)
+
+                        cls_upper = classification.upper()
+                        j_ra = 'RA' if ('APPRENTICE' in cls_upper or '(RA)' in cls_upper) else 'J'
+
+                        w = _blank_worker(int(cell0))
+                        w.update({
+                            'last_name': last_name, 'first_name': first_name,
+                            'j_ra': j_ra, 'classification': classification,
+                            'st_hours': st_hours, 'ot_hours': ot_hours, 'dt_hours': dt_hours,
+                            'total_hours': total_h,
+                            'st_rate': st_rate, 'ot_rate': ot_rate, 'dt_rate': dt_rate,
+                            'rate': st_rate,
+                            'st_gross': st_gross, 'ot_gross': ot_gross, 'dt_gross': dt_gross,
+                            'gross': gross, 'deductions': deductions, 'net': net,
+                        })
+                        parsed_rows.append(w)
+
+    return _finalize_result(header, parsed_rows, compliance, 'simple10', warnings)
+
+
+# ---------------------------------------------------------------------------
+# Generic table fallback — flexible column count, common WH-347 layouts
+# ---------------------------------------------------------------------------
+
+def _extract_generic_table_data(pdf_path):
+    """
+    Flexible fallback for any tabular WH-347 PDF.
+    Tries to locate worker rows by: numeric first cell OR "Last, First" name in cell 0-1.
+    Handles 8–27 column layouts.
+    """
+    header     = _blank_header()
+    compliance = _blank_compliance()
+    warnings   = []
+    parsed_rows = []
+    seen_rows   = set()
+
+    # Try text-based header extraction
+    try:
+        header = _extract_header_text(pdf_path)
+    except Exception:
+        pass
+
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            for table in page.extract_tables() or []:
+                if not table:
+                    continue
+
+                # Detect header row to find column mapping
+                col_map = _detect_column_map(table)
+
+                for row in table:
+                    if not row:
+                        continue
+                    cleaned = [_clean(c) for c in row]
+                    n = len(cleaned)
+                    if n < 5:
+                        continue
+
+                    # Locate the row number: try col 0, or if "Last, First" is col 0 try col 1
+                    row_num = None
+                    name_col_offset = 0
+                    if cleaned[0].isdigit():
+                        row_num = int(cleaned[0])
+                    elif n > 1 and cleaned[1].isdigit():
+                        row_num = int(cleaned[1])
+                        name_col_offset = 1
+
+                    if row_num is None or row_num in seen_rows:
+                        continue
+                    seen_rows.add(row_num)
+
+                    # Extract using detected column map or positional fallback
+                    w = _blank_worker(row_num)
+                    _fill_worker_from_row(w, cleaned, col_map, name_col_offset, n)
+                    parsed_rows.append(w)
+
+    # Try compliance from last page text
+    try:
+        compliance = extract_compliance_statement(pdf_path)
+    except Exception:
+        pass
+
+    return _finalize_result(header, parsed_rows, compliance, 'generic_table', warnings)
+
+
+def _detect_column_map(table):
+    """
+    Scan the first few rows of a table for header keywords.
+    Returns a dict mapping field names to column indexes.
+    """
+    col_map = {}
+    HEADER_KEYWORDS = {
+        'row_number':    r'^#$|^no\.?$|^row',
+        'last_name':     r'last\s*name|surname',
+        'first_name':    r'first\s*name',
+        'classification':r'class|trade|occupation',
+        'j_ra':          r'^j/ra$|journeyman|apprentice\s*status',
+        'st_hours':      r'^st\s*hr|straight.*hour|reg.*hour',
+        'ot_hours':      r'^ot\s*hr|over.*hour',
+        'dt_hours':      r'^dt\s*hr|double.*hour',
+        'total_hours':   r'total\s*hr|total\s*hours',
+        'st_rate':       r'st\s*rate|straight.*rate|base\s*rate|hourly\s*rate',
+        'ot_rate':       r'ot\s*rate|over.*rate',
+        'gross':         r'gross\s*(pay|wages|amount)?$|total\s*gross',
+        'deductions':    r'deduct|total\s*ded',
+        'net':           r'^net\s*(pay|wages)?$',
+    }
+    for row in table[:6]:
+        if not row:
+            continue
+        for ci, cell in enumerate(row):
+            cell_str = _clean(cell).lower()
+            if not cell_str:
+                continue
+            for field, pattern in HEADER_KEYWORDS.items():
+                if re.search(pattern, cell_str) and field not in col_map:
+                    col_map[field] = ci
+    return col_map
+
+
+def _fill_worker_from_row(w, cleaned, col_map, offset, n):
+    """Fill a worker dict from a cleaned row using col_map or positional fallback."""
+    def get(field, fallback_idx):
+        idx = col_map.get(field, fallback_idx + offset)
+        return cleaned[idx] if 0 <= idx < n else ''
+
+    # Name: handle "Last, First" or separate columns
+    last_col  = col_map.get('last_name',  1 + offset)
+    first_col = col_map.get('first_name', 2 + offset)
+    if last_col < n:
+        name_val = cleaned[last_col]
+        if ',' in name_val and first_col >= n:
+            parts = name_val.split(',', 1)
+            w['last_name']  = parts[0].strip().title()
+            w['first_name'] = parts[1].strip().title()
+        else:
+            w['last_name']  = name_val.title()
+            if first_col < n:
+                w['first_name'] = cleaned[first_col].title()
+
+    mi_col  = col_map.get('middle_initial', 3 + offset)
+    id_col  = col_map.get('worker_id',      4 + offset)
+    jra_col = col_map.get('j_ra',           5 + offset)
+    cls_col = col_map.get('classification', 6 + offset)
+    if mi_col  < n: w['middle_initial']  = cleaned[mi_col]
+    if id_col  < n: w['worker_id']       = cleaned[id_col]
+    if jra_col < n: w['j_ra']            = cleaned[jra_col].upper()
+    if cls_col < n: w['classification']  = cleaned[cls_col]
+
+    # Infer J/RA from classification if not set
+    if not w['j_ra']:
+        cls_up = w['classification'].upper()
+        w['j_ra'] = 'RA' if ('APPRENTICE' in cls_up or '(RA)' in cls_up) else 'J'
+
+    # Hours / rates / pay — positional fallback based on common WH-347 column order
+    if 'st_hours' in col_map:
+        w['st_hours']    = _safe_float(cleaned[col_map['st_hours']])
+        w['ot_hours']    = _safe_float(cleaned[col_map.get('ot_hours', -1)]) if 'ot_hours' in col_map else 0.0
+        w['dt_hours']    = _safe_float(cleaned[col_map.get('dt_hours', -1)]) if 'dt_hours' in col_map else 0.0
+        w['total_hours'] = _safe_float(cleaned[col_map.get('total_hours', -1)]) if 'total_hours' in col_map else 0.0
+        w['st_rate']     = _safe_float(cleaned[col_map.get('st_rate', -1)]) if 'st_rate' in col_map else 0.0
+        w['gross']       = _safe_float(cleaned[col_map.get('gross', -1)]) if 'gross' in col_map else 0.0
+        w['deductions']  = _safe_float(cleaned[col_map.get('deductions', -1)]) if 'deductions' in col_map else 0.0
+        w['net']         = _safe_float(cleaned[col_map.get('net', -1)]) if 'net' in col_map else 0.0
+    else:
+        # Pure positional — works for 14-20 col WH-347 variants
+        base = 7 + offset
+        if n >= base + 8:
+            w['st_hours'] = _safe_float(cleaned[base])
+            w['ot_hours'] = _safe_float(cleaned[base + 1])
+            w['dt_hours'] = _safe_float(cleaned[base + 2])
+            w['total_hours'] = _safe_float(cleaned[base + 3])
+            w['st_rate']  = _safe_float(cleaned[base + 4])
+            w['gross']    = _safe_float(cleaned[base + 5])
+            w['deductions'] = _safe_float(cleaned[base + 6])
+            w['net']      = _safe_float(cleaned[base + 7])
+        elif n >= base + 4:
+            w['total_hours'] = _safe_float(cleaned[base])
+            w['st_rate']     = _safe_float(cleaned[base + 1])
+            w['gross']       = _safe_float(cleaned[base + 2])
+            w['net']         = _safe_float(cleaned[base + 3])
+
+    if w['total_hours'] == 0:
+        w['total_hours'] = round(w['st_hours'] + w['ot_hours'] + w['dt_hours'], 2)
+    if w['st_hours'] == 0 and w['total_hours'] > 0 and w['ot_hours'] == 0:
+        w['st_hours'] = w['total_hours']
+
+
+# ---------------------------------------------------------------------------
+# Text-based header and compliance fallbacks
+# ---------------------------------------------------------------------------
+
+def _extract_header_text(pdf_path):
+    """Extract header fields from raw text using regex (fallback for non-annotation PDFs)."""
+    header = _blank_header()
+    with pdfplumber.open(pdf_path) as pdf:
+        if not pdf.pages:
+            return header
+        text = (pdf.pages[0].extract_text() or '')
+        if len(pdf.pages) > 1:
+            text += '\n' + (pdf.pages[1].extract_text() or '')
+
+    def find(pattern, default=''):
+        m = re.search(pattern, text, re.IGNORECASE)
+        return m.group(1).strip() if m else default
+
+    header['contractor_name']  = find(r'Contractor[:\s]+([A-Za-z0-9\s&,\.\-\']{3,60}?)(?:\n|Address|LLC|Inc|$)')
+    header['contractor_address']= find(r'Address[:\s]+([^\n]{5,80})')
+    header['payroll_number']   = find(r'Payroll\s*(?:No\.?|Number|#)[:\s]*(\d+)')
+    header['week_ending']      = find(r'Week\s*Ending[:\s]+(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})')
+    header['project_name']     = find(r'Project\s*(?:Name|and\s*Location)?[:\s]+([^\n]{3,80})')
+    header['contract_number']  = find(r'Contract\s*(?:No\.?|Number|#)[:\s]+([A-Z0-9\-]{3,30})')
+    header['wage_determination_number'] = find(r'Wage\s*Det(?:ermination)?[:\s#.]*([A-Z]{2}\d{6,})')
+    return header
+
+
+def extract_compliance_statement(pdf_path):
+    result = _blank_compliance()
+    with pdfplumber.open(pdf_path) as pdf:
+        if not pdf.pages:
+            return result
+        text = (pdf.pages[-1].extract_text() or '')
+        if len(pdf.pages) == 1:
+            text = (pdf.pages[0].extract_text() or '')
+
+    cert_kws = ['certify', 'penalties of perjury', 'statement of compliance',
+                'willful falsification', 'i, the undersigned']
+    if not any(kw in text.lower() for kw in cert_kws):
+        return result
+
+    result['detected_by_text'] = True
+    name_m = re.search(
+        r'(?:Signature|Signed|Name)[:\s]+([A-Za-z\s\.\-\']{3,50}?)(?:\n|Title|Date)',
+        text, re.IGNORECASE)
+    date_m = re.search(r'Date[:\s]+(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})', text, re.IGNORECASE)
+
+    if name_m:
+        result['certified_name']      = name_m.group(1).strip()
+        result['certified_signature'] = True
+    if date_m:
+        result['certified_date']      = date_m.group(1).strip()
+        result['certified_signature'] = True
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Text-line fallback (last resort — scanned or unusual layout PDFs)
+# ---------------------------------------------------------------------------
+
+def _extract_text_fallback(pdf_path):
+    warnings   = []
+    header     = _blank_header()
+    compliance = _blank_compliance()
+    parsed_rows = []
+
+    warnings.append("Fell back to text-line parser — data quality may be limited.")
+
+    lines = []
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text() or ''
+            for raw in text.splitlines():
+                ln = re.sub(r'\s+', ' ', raw.strip())
+                if ln:
+                    lines.append(ln)
+
+    name_pattern = re.compile(
+        r'^(\d+)\s+([A-Z\-\']+)\s+([A-Z\-\']+)\s*([A-Z]?)\s+([A-Z0-9]{3,})\s+(J|RA)'
+    )
+
+    blocks   = []
+    current  = []
+    for line in lines:
+        if re.match(r'^\d+\s+[A-Z]', line):
+            if current:
+                blocks.append(current)
+            current = [line]
+        elif current:
+            current.append(line)
+    if current:
+        blocks.append(current)
+
+    for block in blocks:
+        m = name_pattern.match(block[0])
+        if not m:
+            continue
+        w = _blank_worker(int(m.group(1)))
+        w['last_name']      = m.group(2).title()
+        w['first_name']     = m.group(3).title()
+        w['middle_initial'] = m.group(4)
+        w['worker_id']      = m.group(5)
+        w['j_ra']           = m.group(6)
+
+        for line in block:
+            tm = re.search(r'\b(ST|OT|DT)\b', line)
+            if not tm:
+                continue
+            nums = [_safe_float(n) for n in re.findall(r'\d+\.\d+', line)]
+            if len(nums) < 5:
+                continue
+            record = {'hours': nums[-5], 'rate': nums[-4], 'gross': nums[-3],
+                      'deductions': nums[-2], 'net': nums[-1]}
+            t = tm.group(1)
+            if   t == 'ST': w['st_hours']=record['hours']; w['st_rate']=record['rate']; w['st_gross']=record['gross']
+            elif t == 'OT': w['ot_hours']=record['hours']; w['ot_rate']=record['rate']; w['ot_gross']=record['gross']
+            elif t == 'DT': w['dt_hours']=record['hours']; w['dt_rate']=record['rate']; w['dt_gross']=record['gross']
+
+        w['total_hours'] = round(w['st_hours'] + w['ot_hours'] + w['dt_hours'], 2)
+        w['gross']       = round(w['st_gross'] + w['ot_gross'] + w['dt_gross'], 2)
+        parsed_rows.append(w)
+
+    try:
+        header     = _extract_header_text(pdf_path)
+        compliance = extract_compliance_statement(pdf_path)
+    except Exception:
+        pass
+
+    return _finalize_result(header, parsed_rows, compliance, 'text_fallback', warnings)
 
 
 # ---------------------------------------------------------------------------
@@ -1054,288 +943,72 @@ def _extract_itextsharp_data(pdf_path):
 
 def extract_wh347_data(pdf_path):
     """
-    Extracts WH-347 payroll data from a PDF.
+    Extract WH-347 payroll data from a PDF.
 
-    Strategy:
-    1. Try FreeText annotation extraction (handles Jan 2025 DOL official form).
-    2. Fall back to pdfplumber table extraction.
-    3. Fall back to raw text parsing.
+    Tries parsers in confidence order:
+      1. iTextSharp (27-col/26-col ST/OT/DT sub-rows)
+      2. Simple 10-column key-value format
+      3. Jan 2025 DOL FreeText annotation format
+      4. Generic flexible table parser
+      5. Text-line fallback
 
-    Returns:
-    {
-        'header': {...},
-        'lines': [...],
-        'totals': {...},
-        'compliance_statement': {...}
-    }
+    Returns dict with keys: header, lines, totals, compliance_statement,
+                             parser_used, parse_warnings
     """
-
     if not os.path.exists(pdf_path):
         raise FileNotFoundError(f'File not found: {pdf_path}')
 
-    def clean_cell(cell):
-        return str(cell).strip() if cell else ''
-
-    # -------------------------------------------------------------------------
-    # Attempt 1: iTextSharp multi-page format (27-col/26-col ST/OT/DT sub-rows)
-    # -------------------------------------------------------------------------
+    # 1 — iTextSharp
     try:
         if _is_itextsharp_format(pdf_path):
-            print('[*] Detected iTextSharp WH-347 format -- using structured table parser')
-            return _extract_itextsharp_data(pdf_path)
+            print('[parser] iTextSharp format detected')
+            result = _extract_itextsharp_data(pdf_path)
+            if result['totals']['workers'] > 0:
+                return result
     except Exception as e:
-        print(f'[!] iTextSharp parser error: {e} -- falling back')
+        print(f'[parser] iTextSharp error: {e}')
 
-    # -------------------------------------------------------------------------
-    # Attempt 2: Simple 10-column custom format (2-col header + 10-col workers)
-    # -------------------------------------------------------------------------
+    # 2 — Simple 10-col
     try:
         if _is_simple10_format(pdf_path):
-            print('[*] Detected simple 10-col WH-347 format -- using key-value parser')
-            return _extract_simple10_data(pdf_path)
+            print('[parser] Simple 10-col format detected')
+            result = _extract_simple10_data(pdf_path)
+            if result['totals']['workers'] > 0:
+                return result
     except Exception as e:
-        print(f'[!] Simple 10-col parser error: {e} -- falling back')
+        print(f'[parser] Simple 10-col error: {e}')
 
-    # -------------------------------------------------------------------------
-    # Attempt 3: FreeText annotation extraction (Jan 2025 DOL official form)
-    # -------------------------------------------------------------------------
-    parsed_rows = []
-    header = {}
-    compliance_statement = {}
-
+    # 3 — FreeText annotations (Jan 2025 DOL form)
     try:
         annots = _get_freetext_annotations(pdf_path)
         if annots:
+            print(f'[parser] FreeText annotations found ({len(annots)} total)')
             with pdfplumber.open(pdf_path) as pdf:
                 total_pages = len(pdf.pages)
 
-            # Extract header from page 1
-            header = _extract_header_from_annotations(annots, page_num=1)
+            header     = _extract_header_from_annotations(annots, page_num=1)
+            compliance = _extract_compliance_from_annotations(annots, total_pages)
 
-            # Extract workers from all pages except last (compliance page)
             worker_pages = range(1, total_pages + 1) if total_pages == 1 else range(1, total_pages)
+            rows = []
             for pg in worker_pages:
-                rows = _extract_workers_from_annotations(annots, page_num=pg)
-                parsed_rows.extend(rows)
+                rows.extend(_extract_workers_from_annotations(annots, page_num=pg))
 
-            # Extract compliance statement from last page
-            compliance_statement = _extract_compliance_from_annotations(annots, total_pages)
-
+            if rows:
+                return _finalize_result(header, rows, compliance, 'freetext_annotation', [])
+            print('[parser] FreeText annotations found but no worker rows — trying table parser')
     except Exception as e:
-        print(f'[!] FreeText extraction error: {e} -- trying table mode')
+        print(f'[parser] FreeText annotation error: {e}')
 
-    # -------------------------------------------------------------------------
-    # Attempt 4: pdfplumber table extraction
-    # -------------------------------------------------------------------------
-    if not parsed_rows:
-        with pdfplumber.open(pdf_path) as pdf:
-            for page_number, page in enumerate(pdf.pages, start=1):
-                tables = page.extract_tables()
-                for table in tables:
-                    if not table:
-                        continue
-                    for row in table:
-                        if not row:
-                            continue
-                        cleaned = [clean_cell(c) for c in row]
-                        if not cleaned[0].isdigit():
-                            continue
-                        try:
-                            row_number = int(cleaned[0])
-                            last_name = cleaned[1].title() if len(cleaned) > 1 else ''
-                            first_name = cleaned[2].title() if len(cleaned) > 2 else ''
-                            middle_initial = cleaned[3] if len(cleaned) > 3 else ''
-                            worker_id = cleaned[4] if len(cleaned) > 4 else ''
-                            j_ra = cleaned[5] if len(cleaned) > 5 else ''
-                            classification = cleaned[6] if len(cleaned) > 6 else ''
+    # 4 — Generic flexible table
+    try:
+        print('[parser] Trying generic table parser')
+        result = _extract_generic_table_data(pdf_path)
+        if result['totals']['workers'] > 0:
+            return result
+    except Exception as e:
+        print(f'[parser] Generic table error: {e}')
 
-                            num_cols = len(cleaned)
-                            if num_cols >= 20:
-                                st_hours = _safe_float(cleaned[7])
-                                st_rate = _safe_float(cleaned[8])
-                                st_gross = _safe_float(cleaned[9])
-                                ot_hours = _safe_float(cleaned[10])
-                                ot_rate = _safe_float(cleaned[11])
-                                ot_gross = _safe_float(cleaned[12])
-                                dt_hours = _safe_float(cleaned[13])
-                                dt_rate = _safe_float(cleaned[14])
-                                dt_gross = _safe_float(cleaned[15])
-                                total_hours = _safe_float(cleaned[16])
-                                gross = _safe_float(cleaned[17])
-                                deductions = _safe_float(cleaned[18])
-                                net = _safe_float(cleaned[19])
-                                fringe_cash = _safe_float(cleaned[20]) if num_cols > 20 else 0.0
-                            else:
-                                st_hours = _safe_float(cleaned[7]) if len(cleaned) > 7 else 0.0
-                                ot_hours = _safe_float(cleaned[8]) if len(cleaned) > 8 else 0.0
-                                dt_hours = _safe_float(cleaned[9]) if len(cleaned) > 9 else 0.0
-                                total_hours = _safe_float(cleaned[10]) if len(cleaned) > 10 else 0.0
-                                st_rate = _safe_float(cleaned[11]) if len(cleaned) > 11 else 0.0
-                                ot_rate = round(st_rate * 1.5, 2)
-                                dt_rate = round(st_rate * 2.0, 2)
-                                gross = _safe_float(cleaned[12]) if len(cleaned) > 12 else 0.0
-                                st_gross = gross
-                                ot_gross = 0.0
-                                dt_gross = 0.0
-                                deductions = _safe_float(cleaned[13]) if len(cleaned) > 13 else 0.0
-                                net = _safe_float(cleaned[14]) if len(cleaned) > 14 else 0.0
-                                fringe_cash = 0.0
-
-                        except Exception:
-                            continue
-
-                        parsed_rows.append({
-                            'row_number': row_number,
-                            'first_name': first_name,
-                            'last_name': last_name,
-                            'middle_initial': middle_initial,
-                            'worker_id': worker_id,
-                            'j_ra': j_ra,
-                            'classification': classification,
-                            'st_hours': st_hours,
-                            'ot_hours': ot_hours,
-                            'dt_hours': dt_hours,
-                            'total_hours': total_hours,
-                            'st_rate': st_rate,
-                            'ot_rate': ot_rate,
-                            'dt_rate': dt_rate,
-                            'rate': st_rate,
-                            'st_gross': st_gross,
-                            'ot_gross': ot_gross,
-                            'dt_gross': dt_gross,
-                            'gross': gross,
-                            'deductions': deductions,
-                            'net': net,
-                            'fringe_paid_cash': fringe_cash,
-                            'fringe_plan_name': '',
-                            'fringe_plan_amount': 0.0,
-                            'apprentice_program_name': '',
-                            'apprentice_period': 0,
-                            'apprentice_percent': 0.0,
-                        })
-
-    # -------------------------------------------------------------------------
-    # Attempt 5: Fallback text parser
-    # -------------------------------------------------------------------------
-    if not parsed_rows:
-        print('[!] No structured data found -- using fallback text parser.')
-        lines = []
-        with pdfplumber.open(pdf_path) as pdf:
-            for page in pdf.pages:
-                text = page.extract_text() or ''
-                for raw in text.splitlines():
-                    cleaned_line = re.sub(r'\s+', ' ', raw.strip())
-                    if cleaned_line:
-                        lines.append(cleaned_line)
-
-        worker_blocks = []
-        current = []
-        for line in lines:
-            if re.match(r'^\d+\s+[A-Z]', line):
-                if current:
-                    worker_blocks.append(current)
-                current = [line]
-            else:
-                if current:
-                    current.append(line)
-        if current:
-            worker_blocks.append(current)
-
-        name_pattern = re.compile(
-            r'^(\d+)\s+([A-Z\-\']+)\s+([A-Z\-\']+)\s*([A-Z]?)\s+([A-Z0-9]{3,})\s+(J|RA)'
-        )
-
-        for block in worker_blocks:
-            match = name_pattern.match(block[0])
-            if not match:
-                continue
-
-            row_number = int(match.group(1))
-            last_name = match.group(2).title()
-            first_name = match.group(3).title()
-            middle_initial = match.group(4)
-            worker_id = match.group(5)
-            j_ra = match.group(6)
-
-            st = {'hours': 0.0, 'rate': 0.0, 'gross': 0.0, 'deductions': 0.0, 'net': 0.0}
-            ot = {'hours': 0.0, 'rate': 0.0, 'gross': 0.0, 'deductions': 0.0, 'net': 0.0}
-            dt = {'hours': 0.0, 'rate': 0.0, 'gross': 0.0, 'deductions': 0.0, 'net': 0.0}
-
-            for line in block:
-                type_match = re.search(r'\b(ST|OT|DT)\b', line)
-                if not type_match:
-                    continue
-                nums = re.findall(r'\d+\.\d+', line)
-                if len(nums) < 5:
-                    continue
-                nums = [_safe_float(n) for n in nums]
-                record = {
-                    'hours': nums[-5], 'rate': nums[-4], 'gross': nums[-3],
-                    'deductions': nums[-2], 'net': nums[-1],
-                }
-                t = type_match.group(1)
-                if t == 'ST':
-                    st = record
-                elif t == 'OT':
-                    ot = record
-                elif t == 'DT':
-                    dt = record
-
-            st_rate = st['rate']
-            ot_rate = ot['rate'] if ot['rate'] > 0 else round(st_rate * 1.5, 2)
-            dt_rate = dt['rate'] if dt['rate'] > 0 else round(st_rate * 2.0, 2)
-            total_hours = st['hours'] + ot['hours'] + dt['hours']
-            gross_total = st['gross'] + ot['gross'] + dt['gross']
-
-            parsed_rows.append({
-                'row_number':    row_number,
-                'first_name':    first_name,
-                'last_name':     last_name,
-                'middle_initial': middle_initial,
-                'worker_id':     worker_id,
-                'j_ra':          j_ra,
-                'classification': 'Unknown',
-                'st_hours':      st['hours'],
-                'ot_hours':      ot['hours'],
-                'dt_hours':      dt['hours'],
-                'total_hours':   total_hours,
-                'st_rate':       st_rate,
-                'ot_rate':       ot_rate,
-                'dt_rate':       dt_rate,
-                'rate':          st_rate,
-                'st_gross':      st['gross'],
-                'ot_gross':      ot['gross'],
-                'dt_gross':      dt['gross'],
-                'gross':         gross_total,
-                'deductions':    st['deductions'] + ot['deductions'] + dt['deductions'],
-                'net':           st['net'] + ot['net'] + dt['net'],
-                'fringe_paid_cash':   0.0,
-                'fringe_plan_name':   '',
-                'fringe_plan_amount': 0.0,
-                'apprentice_program_name': '',
-                'apprentice_period': 0,
-                'apprentice_percent': 0.0,
-            })
-
-    # -------------------------------------------------------------------------
-    # Fill in header if not yet extracted
-    # -------------------------------------------------------------------------
-    if not header:
-        header = extract_wh347_header(pdf_path)
-    if not compliance_statement:
-        compliance_statement = extract_compliance_statement(pdf_path)
-
-    journeymen = sum(1 for w in parsed_rows if w.get('j_ra', '').upper() == 'J')
-    apprentices = sum(1 for w in parsed_rows if w.get('j_ra', '').upper() == 'RA')
-
-    return {
-        'header':               header,
-        'lines':                parsed_rows,
-        'totals': {
-            'workers':      len(parsed_rows),
-            'journeymen':   journeymen,
-            'apprentices':  apprentices,
-            'total_gross':  round(sum(w.get('gross', 0) for w in parsed_rows), 2),
-        },
-        'compliance_statement': compliance_statement,
-    }
+    # 5 — Text-line fallback
+    print('[parser] All structured parsers failed — using text-line fallback')
+    return _extract_text_fallback(pdf_path)
