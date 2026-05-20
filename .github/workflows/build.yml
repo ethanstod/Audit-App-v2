@@ -22,7 +22,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install pyinstaller waitress pystray pillow
+          pip install pyinstaller pywebview waitress pillow
 
       - name: Build with PyInstaller
         run: pyinstaller wh347_audit.spec --clean --noconfirm

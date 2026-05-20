@@ -4,22 +4,22 @@
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
-# Collect everything from packages that use dynamic imports
 pdfminer_d,   pdfminer_b,   pdfminer_h   = collect_all("pdfminer")
 pdfplumber_d, pdfplumber_b, pdfplumber_h = collect_all("pdfplumber")
-pandas_h  = collect_submodules("pandas")
+webview_d,    webview_b,    webview_h    = collect_all("webview")
+pandas_h   = collect_submodules("pandas")
 openpyxl_h = collect_submodules("openpyxl")
 
 a = Analysis(
     ["main.py"],
     pathex=["."],
-    binaries=[] + pdfminer_b + pdfplumber_b,
+    binaries=[] + pdfminer_b + pdfplumber_b + webview_b,
     datas=[
         ("templates",          "templates"),
         ("cleaned_rates.xlsx", "."),
-    ] + pdfminer_d + pdfplumber_d,
+    ] + pdfminer_d + pdfplumber_d + webview_d,
     hiddenimports=[
-        # Our audit modules
+        # Audit modules
         "pdf_parser", "math_audit", "cwhssa_audit", "pay_audit",
         "fringe_audit", "classification_audit", "header_audit", "wh347_report",
         # Flask / Werkzeug / Jinja2
@@ -30,16 +30,17 @@ a = Analysis(
         "click",
         # Waitress WSGI server
         "waitress", "waitress.server", "waitress.task", "waitress.channel",
-        # System tray
-        "pystray", "pystray._win32",
+        # pywebview native window (WebView2 on Windows 10/11)
+        "webview",
+        "webview.platforms",
+        "webview.platforms.edgechromium",
+        "webview.platforms.mshtml",
+        # Image / data
         "PIL", "PIL.Image", "PIL.ImageDraw",
-        # Data
         "sqlite3", "_sqlite3",
         "openpyxl", "openpyxl.styles", "openpyxl.utils", "openpyxl.reader",
         "charset_normalizer",
-        "cryptography",
-        "Crypto",
-    ] + pdfminer_h + pdfplumber_h + pandas_h + openpyxl_h,
+    ] + pdfminer_h + pdfplumber_h + webview_h + pandas_h + openpyxl_h,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -58,8 +59,8 @@ exe = EXE(
     debug=False,
     strip=False,
     upx=True,
-    console=False,          # No black console window
-    icon=None,              # Replace with "icon.ico" if you add one
+    console=False,
+    icon=None,
 )
 
 coll = COLLECT(
