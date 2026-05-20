@@ -28,9 +28,8 @@ jobs:
         run: pyinstaller wh347_audit.spec --clean --noconfirm
 
       - name: Build installer with Inno Setup
-        run: |
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
-        shell: powershell
+        shell: cmd
+        run: '"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss'
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
