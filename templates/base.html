@@ -420,11 +420,18 @@
             padding: 18px 0;
         }
         .contractor-block:last-child { border-bottom: none; }
+        .contractor-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+            gap: 12px;
+        }
+        .contractor-actions { display: flex; gap: 6px; flex-shrink: 0; }
         .contractor-name {
             font-size: 15px;
             font-weight: 700;
             color: var(--text);
-            margin-bottom: 12px;
             display: flex;
             align-items: center;
             gap: 8px;
@@ -436,7 +443,18 @@
             height: 16px;
             background: var(--accent);
             border-radius: 2px;
+            flex-shrink: 0;
         }
+        .rename-row { margin-bottom: 12px; }
+        .rename-input {
+            padding: 7px 10px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            font-size: 13px;
+            color: var(--text);
+            min-width: 240px;
+        }
+        .rename-input:focus { outline: none; border-color: var(--accent); }
         .doc-slots {
             display: grid;
             grid-template-columns: repeat(3, 1fr);

@@ -275,13 +275,15 @@ def index():
     for doc in docs:
         contractors[doc["contractor_name"]][doc["doc_type"]].append(doc)
     contractors = dict(sorted(contractors.items(), key=lambda x: x[0].lower()))
+    contractor_names = list(contractors.keys())
 
     return render_template("index.html",
                            total_pass=total_pass,
                            total_fail=total_fail,
                            total_warn=total_warn,
                            wage_det=WAGE_DET_INFO,
-                           contractors=contractors)
+                           contractors=contractors,
+                           contractor_names=contractor_names)
 
 
 def _accept_supp_pdf(field_name):
@@ -438,6 +440,87 @@ def delete_audit(audit_id):
         flash("Audit deleted.", "info")
 
     conn.close()
+    return redirect(url_for("index"))
+
+
+@app.route("/docs/upload", methods=["POST"])
+def upload_docs():
+    """Standalone supporting-document upload — no WH-347 required."""
+    contractor_name = request.form.get("contractor_name", "").strip()
+    if not contractor_name:
+        flash("Contractor name is required.", "error")
+        return redirect(url_for("index"))
+
+    conn = get_db()
+    uploaded = 0
+
+    def _store(field, doc_type):
+        nonlocal uploaded
+        f = request.files.get(field)
+        if f and f.filename and f.filename.lower().endswith(".pdf"):
+            doc_id = uuid.uuid4().hex[:10]
+            dest   = os.path.join(DOCS_DIR, f"{doc_id}_{f.filename}")
+            f.save(dest)
+            conn.execute("""
+                INSERT INTO contractor_docs
+                    (id, contractor_name, doc_type, original_name, file_path, uploaded_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (doc_id, contractor_name, doc_type, f.filename, dest,
+                  datetime.now().strftime("%Y-%m-%d %H:%M")))
+            uploaded += 1
+
+    _store("fringe_plan_pdf",    "fringe_plan")
+    _store("apprentice_pdf",     "apprentice")
+    _store("wage_deduction_pdf", "wage_deduction")
+
+    conn.commit()
+    conn.close()
+
+    if uploaded:
+        flash(f"{uploaded} document(s) added for {contractor_name}.", "success")
+    else:
+        flash("No PDF files were selected.", "warning")
+    return redirect(url_for("index"))
+
+
+@app.route("/contractors/rename", methods=["POST"])
+def rename_contractor():
+    old_name = request.form.get("old_name", "").strip()
+    new_name = request.form.get("new_name", "").strip()
+    if not old_name or not new_name or old_name == new_name:
+        return redirect(url_for("index"))
+
+    conn = get_db()
+    conn.execute("UPDATE contractor_docs SET contractor_name = ? WHERE contractor_name = ?",
+                 (new_name, old_name))
+    conn.execute("UPDATE audits SET contractor_name = ? WHERE contractor_name = ?",
+                 (new_name, old_name))
+    conn.commit()
+    conn.close()
+    flash(f"Renamed \"{old_name}\" to \"{new_name}\".", "success")
+    return redirect(url_for("index"))
+
+
+@app.route("/contractors/delete", methods=["POST"])
+def delete_contractor():
+    name = request.form.get("contractor_name", "").strip()
+    if not name:
+        return redirect(url_for("index"))
+
+    conn = get_db()
+    docs = conn.execute(
+        "SELECT file_path FROM contractor_docs WHERE contractor_name = ?", (name,)
+    ).fetchall()
+    for doc in docs:
+        if doc["file_path"] and os.path.exists(doc["file_path"]):
+            try:
+                os.remove(doc["file_path"])
+            except Exception:
+                pass
+    conn.execute("DELETE FROM contractor_docs WHERE contractor_name = ?", (name,))
+    conn.commit()
+    conn.close()
+    flash(f"Deleted all documents for \"{name}\".", "info")
     return redirect(url_for("index"))
 
 
