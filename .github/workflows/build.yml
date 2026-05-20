@@ -27,10 +27,9 @@ jobs:
       - name: Build with PyInstaller
         run: pyinstaller wh347_audit.spec --clean --noconfirm
 
-      - name: Zip output folder
+      - name: Build installer with Inno Setup
         run: |
-          Compress-Archive -Path "dist\WH347 Audit Engine\*" `
-                           -DestinationPath "WH347-Audit-Engine-Windows.zip"
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
         shell: powershell
 
       - name: Publish GitHub Release
@@ -40,12 +39,12 @@ jobs:
           body: |
             ## Installation
 
-            1. Download **WH347-Audit-Engine-Windows.zip** below
-            2. Extract the zip to any folder (e.g. `C:\WH347 Audit Engine\`)
-            3. Double-click **WH347 Audit Engine.exe**
-            4. The app opens in your browser automatically
-            5. A tray icon appears — right-click it to reopen or exit
+            1. Download **WH347-Audit-Engine-Setup.exe** below
+            2. Run the installer and follow the prompts (Next → Next → Install → Finish)
+            3. The app will launch automatically after install
+            4. A desktop shortcut is created for easy access
 
             ## Updating the wage determination
-            Replace `cleaned_rates.xlsx` in the extracted folder with your new file.
-          files: WH347-Audit-Engine-Windows.zip
+            Replace `cleaned_rates.xlsx` in your install folder with your updated file.
+            Default location: `C:\Program Files\WH347 Audit Engine\cleaned_rates.xlsx`
+          files: dist/WH347-Audit-Engine-Setup.exe
