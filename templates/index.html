@@ -41,8 +41,8 @@
 
     <form id="upload-form" method="POST" action="/upload" enctype="multipart/form-data">
 
-        <!-- Drop zone -->
-        <div class="form-group full" style="margin-bottom: 20px;">
+        <!-- Main WH-347 drop zone -->
+        <div class="form-group full" style="margin-bottom: 10px;">
             <div class="drop-zone" id="drop-zone" onclick="document.getElementById('pdf-input').click()">
                 <div class="drop-zone-icon">&#128196;</div>
                 <p><strong>Click to select</strong> or drag and drop a WH-347 PDF</p>
@@ -53,69 +53,35 @@
                    style="display:none" required>
         </div>
 
-        <hr class="divider">
-
-        <!-- Supporting Documents — 3 columns -->
-        <div style="margin-bottom: 16px;">
-            <div class="section-title" style="font-size:14px;">Supporting Documents</div>
-            <p style="font-size:12px;color:var(--muted);margin-top:4px;">
-                Drag PDFs exported from LCPtracker into each slot. These are processed for the audit record and not stored on the server.
-            </p>
+        <!-- Supporting document boxes — directly below the main drop zone -->
+        <div class="mini-supp-row">
+            <div class="mini-supp-box" id="supp-zone-fringe"
+                 onclick="document.getElementById('fringe-plan-input').click()">
+                <div class="mini-supp-icon">&#128196;</div>
+                <div class="mini-supp-label">Fringe Benefit Plan</div>
+                <div class="mini-supp-hint">optional · drag or click</div>
+                <div class="mini-supp-name" id="supp-name-fringe"></div>
+            </div>
+            <div class="mini-supp-box" id="supp-zone-apprentice"
+                 onclick="document.getElementById('apprentice-input').click()">
+                <div class="mini-supp-icon">&#128196;</div>
+                <div class="mini-supp-label">Apprentice Registration</div>
+                <div class="mini-supp-hint">optional · drag or click</div>
+                <div class="mini-supp-name" id="supp-name-apprentice"></div>
+            </div>
+            <div class="mini-supp-box" id="supp-zone-deduction"
+                 onclick="document.getElementById('deduction-input').click()">
+                <div class="mini-supp-icon">&#128196;</div>
+                <div class="mini-supp-label">Wage Deductions / Court Docs</div>
+                <div class="mini-supp-hint">optional · drag or click</div>
+                <div class="mini-supp-name" id="supp-name-deduction"></div>
+            </div>
         </div>
+        <input type="file" id="fringe-plan-input" name="fringe_plan_pdf" accept=".pdf" style="display:none">
+        <input type="file" id="apprentice-input"  name="apprentice_pdf"  accept=".pdf" style="display:none">
+        <input type="file" id="deduction-input"   name="wage_deduction_pdf" accept=".pdf" style="display:none">
 
-        <div class="supp-grid">
-
-            <!-- Column 1: Fringe Plan -->
-            <div class="supp-col">
-                <div class="supp-col-header">
-                    <div class="supp-col-title">Fringe Benefit Plan</div>
-                    <div class="supp-col-reg">29 CFR 5.5(a)(1)(ii)</div>
-                </div>
-                <div class="supp-zone" id="supp-zone-fringe"
-                     onclick="document.getElementById('fringe-plan-input').click()">
-                    <div class="supp-zone-icon">PDF</div>
-                    <div class="supp-zone-hint">Drop plan document here</div>
-                    <div class="supp-zone-name" id="supp-name-fringe"></div>
-                </div>
-                <input type="file" id="fringe-plan-input" name="fringe_plan_pdf"
-                       accept=".pdf" style="display:none">
-            </div>
-
-            <!-- Column 2: Apprentice Form -->
-            <div class="supp-col">
-                <div class="supp-col-header">
-                    <div class="supp-col-title">Apprentice Registration</div>
-                    <div class="supp-col-reg">29 CFR 5.5(a)(4)</div>
-                </div>
-                <div class="supp-zone" id="supp-zone-apprentice"
-                     onclick="document.getElementById('apprentice-input').click()">
-                    <div class="supp-zone-icon">PDF</div>
-                    <div class="supp-zone-hint">Drop apprentice form here</div>
-                    <div class="supp-zone-name" id="supp-name-apprentice"></div>
-                </div>
-                <input type="file" id="apprentice-input" name="apprentice_pdf"
-                       accept=".pdf" style="display:none">
-            </div>
-
-            <!-- Column 3: Wage Deductions / Court Docs -->
-            <div class="supp-col">
-                <div class="supp-col-header">
-                    <div class="supp-col-title">Wage Deductions / Court Docs</div>
-                    <div class="supp-col-reg">Copeland Act; 29 CFR 3.5</div>
-                </div>
-                <div class="supp-zone" id="supp-zone-deduction"
-                     onclick="document.getElementById('deduction-input').click()">
-                    <div class="supp-zone-icon">PDF</div>
-                    <div class="supp-zone-hint">Drop court orders / deduction auth here</div>
-                    <div class="supp-zone-name" id="supp-name-deduction"></div>
-                </div>
-                <input type="file" id="deduction-input" name="wage_deduction_pdf"
-                       accept=".pdf" style="display:none">
-            </div>
-
-        </div>
-
-        <hr class="divider">
+        <hr class="divider" style="margin-top:20px;">
 
         <div style="margin-bottom: 16px;">
             <div class="section-title" style="font-size:14px;">Fringe Benefit Details</div>
@@ -315,8 +281,8 @@
         loadingMsg.style.display = 'inline';
     });
 
-    // Supplementary document drop zones
-    function setupSuppZone(zoneId, inputId, nameId) {
+    // Mini supporting document boxes
+    function setupMiniBox(zoneId, inputId, nameId) {
         const zone  = document.getElementById(zoneId);
         const input = document.getElementById(inputId);
         const name  = document.getElementById(nameId);
@@ -333,14 +299,8 @@
             zone.classList.add('has-file');
         }
 
-        input.addEventListener('change', () => {
-            if (input.files[0]) setFile(input.files[0]);
-        });
-
-        zone.addEventListener('dragover', e => {
-            e.preventDefault();
-            zone.classList.add('dragover');
-        });
+        input.addEventListener('change', () => { if (input.files[0]) setFile(input.files[0]); });
+        zone.addEventListener('dragover',  e => { e.preventDefault(); zone.classList.add('dragover'); });
         zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
         zone.addEventListener('drop', e => {
             e.preventDefault();
@@ -349,8 +309,8 @@
         });
     }
 
-    setupSuppZone('supp-zone-fringe',     'fringe-plan-input', 'supp-name-fringe');
-    setupSuppZone('supp-zone-apprentice', 'apprentice-input',  'supp-name-apprentice');
-    setupSuppZone('supp-zone-deduction',  'deduction-input',   'supp-name-deduction');
+    setupMiniBox('supp-zone-fringe',     'fringe-plan-input', 'supp-name-fringe');
+    setupMiniBox('supp-zone-apprentice', 'apprentice-input',  'supp-name-apprentice');
+    setupMiniBox('supp-zone-deduction',  'deduction-input',   'supp-name-deduction');
 </script>
 {% endblock %}
