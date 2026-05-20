@@ -3,6 +3,8 @@ uploads/*
 !uploads/.gitkeep
 reports/*
 !reports/.gitkeep
+docs/*
+!docs/.gitkeep
 audits.db
 
 # Output files

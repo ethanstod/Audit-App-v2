@@ -43,6 +43,7 @@ _RESOURCE_DIR = os.environ.get("WH347_RESOURCE_DIR", _RESOURCE_DIR)
 BASE_DIR   = _DATA_DIR
 UPLOAD_DIR = os.path.join(_DATA_DIR, "uploads")
 REPORT_DIR = os.path.join(_DATA_DIR, "reports")
+DOCS_DIR   = os.path.join(_DATA_DIR, "docs")
 DB_PATH    = os.path.join(_DATA_DIR, "audits.db")
 
 # Prefer a rates file placed next to the exe (user-replaceable);
@@ -60,6 +61,7 @@ app.secret_key = os.environ.get("SECRET_KEY", "wh347-audit-dev-key")
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(REPORT_DIR, exist_ok=True)
+os.makedirs(DOCS_DIR,   exist_ok=True)
 
 
 def _load_wage_det_info():
@@ -170,6 +172,17 @@ def init_db():
             conn.execute(f"ALTER TABLE audits ADD COLUMN {col} TEXT DEFAULT ''")
         except Exception:
             pass
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS contractor_docs (
+            id              TEXT PRIMARY KEY,
+            contractor_name TEXT NOT NULL,
+            doc_type        TEXT NOT NULL,
+            original_name   TEXT,
+            file_path       TEXT,
+            uploaded_at     TEXT
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -181,22 +194,9 @@ init_db()
 # Audit runner
 # ---------------------------------------------------------------------------
 
-def run_full_audit(pdf_path, fringe_cash=0.0, fringe_plan_name="", fringe_plan_amount=0.0):
-    """
-    Run all audit modules against a WH-347 PDF.
-    Manual fringe values override whatever was extracted from the PDF.
-    Returns report_data dict.
-    """
+def run_full_audit(pdf_path):
+    """Run all audit modules against a WH-347 PDF. Returns report_data dict."""
     parsed_data = extract_wh347_data(pdf_path)
-
-    # Apply manual fringe overrides to every worker
-    for worker in parsed_data.get("lines", []):
-        if fringe_cash > 0:
-            worker["fringe_paid_cash"] = fringe_cash
-        if fringe_plan_name:
-            worker["fringe_plan_name"] = fringe_plan_name
-        if fringe_plan_amount > 0:
-            worker["fringe_plan_amount"] = fringe_plan_amount
 
     wage_table         = load_wage_table(WAGE_TABLE)
     header_results     = audit_header(parsed_data)
@@ -257,23 +257,31 @@ def count_findings(report_data):
 @app.route("/")
 def index():
     conn = get_db()
-    audits = conn.execute(
-        "SELECT * FROM audits ORDER BY submitted_at DESC"
+
+    # Audit status counts (for stat cards — no history table)
+    audits = conn.execute("SELECT overall_status FROM audits").fetchall()
+    total_pass = sum(1 for a in audits if a["overall_status"] == "PASS")
+    total_fail = sum(1 for a in audits if a["overall_status"] == "FAIL")
+    total_warn = sum(1 for a in audits if a["overall_status"] == "WARN")
+
+    # Contractor documents grouped by contractor name
+    docs = conn.execute(
+        "SELECT * FROM contractor_docs ORDER BY contractor_name COLLATE NOCASE, doc_type, uploaded_at DESC"
     ).fetchall()
     conn.close()
 
-    total      = len(audits)
-    total_fail = sum(1 for a in audits if a["overall_status"] == "FAIL")
-    total_pass = sum(1 for a in audits if a["overall_status"] == "PASS")
-    total_warn = sum(1 for a in audits if a["overall_status"] == "WARN")
+    from collections import defaultdict
+    contractors = defaultdict(lambda: {"fringe_plan": [], "apprentice": [], "wage_deduction": []})
+    for doc in docs:
+        contractors[doc["contractor_name"]][doc["doc_type"]].append(doc)
+    contractors = dict(sorted(contractors.items(), key=lambda x: x[0].lower()))
 
     return render_template("index.html",
-                           audits=audits,
-                           total=total,
                            total_pass=total_pass,
                            total_fail=total_fail,
                            total_warn=total_warn,
-                           wage_det=WAGE_DET_INFO)
+                           wage_det=WAGE_DET_INFO,
+                           contractors=contractors)
 
 
 def _accept_supp_pdf(field_name):
@@ -300,21 +308,7 @@ def upload():
         flash("Only PDF files are accepted.", "error")
         return redirect(url_for("index"))
 
-    def safe_float(val, default=0.0):
-        try:
-            return float(val or 0)
-        except (ValueError, TypeError):
-            return default
-
-    fringe_cash      = safe_float(request.form.get("fringe_cash"))
-    fringe_plan_name = request.form.get("fringe_plan_name", "").strip()
-    fringe_plan_amt  = safe_float(request.form.get("fringe_plan_amount"))
-    submitted_by     = request.form.get("submitted_by", "").strip() or "Unknown"
-
-    # Supplementary documents (processed then discarded — filenames stored for record)
-    fringe_plan_path,    fringe_plan_fname    = _accept_supp_pdf("fringe_plan_pdf")
-    apprentice_path,     apprentice_fname     = _accept_supp_pdf("apprentice_pdf")
-    wage_deduction_path, wage_deduction_fname = _accept_supp_pdf("wage_deduction_pdf")
+    contractor_name_hint = request.form.get("contractor_name", "").strip()
 
     # Save WH-347 PDF
     audit_id     = uuid.uuid4().hex[:10]
@@ -323,16 +317,8 @@ def upload():
     report_path  = os.path.join(REPORT_DIR, f"{audit_id}.html")
     file.save(pdf_path)
 
-    supp_docs = {
-        "fringe_plan_doc":    fringe_plan_fname,
-        "apprentice_doc":     apprentice_fname,
-        "wage_deduction_doc": wage_deduction_fname,
-    }
-
     try:
-        report_data = run_full_audit(pdf_path, fringe_cash, fringe_plan_name, fringe_plan_amt)
-        report_data["supp_docs"] = supp_docs
-        # Surface any parser warnings to the user
+        report_data = run_full_audit(pdf_path)
         for w in report_data.get("parse_warnings", []):
             flash(f"Parser warning: {w}", "warning")
         generate_wh347_html_report(report_data, report_path)
@@ -340,18 +326,13 @@ def upload():
         os.remove(pdf_path)
         flash(f"Audit failed: {e}", "error")
         return redirect(url_for("index"))
-    finally:
-        # Supplementary PDFs are not stored permanently — delete after processing
-        for p in (fringe_plan_path, apprentice_path, wage_deduction_path):
-            if p and os.path.exists(p):
-                try:
-                    os.remove(p)
-                except Exception:
-                    pass
 
     header = report_data["parsed_data"].get("header", {})
     totals = report_data["parsed_data"].get("totals", {})
     v_count, w_count = count_findings(report_data)
+
+    # Contractor name: prefer parsed header, fall back to form hint
+    contractor_name = header.get("contractor_name", "").strip() or contractor_name_hint or "Unknown"
 
     conn = get_db()
     conn.execute("""
@@ -364,12 +345,12 @@ def upload():
         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (
         audit_id,
-        header.get("contractor_name", "Unknown"),
+        contractor_name,
         header.get("contract_number", ""),
         header.get("week_ending", ""),
         header.get("payroll_number", ""),
         datetime.now().strftime("%Y-%m-%d %H:%M"),
-        submitted_by,
+        "System",
         "PASS" if (report_data["passed"] and w_count == 0) else ("WARN" if report_data["passed"] else "FAIL"),
         pdf_filename,
         pdf_path,
@@ -377,13 +358,26 @@ def upload():
         totals.get("workers", 0),
         v_count,
         w_count,
-        fringe_cash,
-        fringe_plan_name,
-        fringe_plan_amt,
-        fringe_plan_fname,
-        apprentice_fname,
-        wage_deduction_fname,
+        0.0, "", 0.0, "", "", "",
     ))
+
+    # Store supporting documents permanently under the contractor name
+    def _store_doc(field_name, doc_type):
+        f = request.files.get(field_name)
+        if f and f.filename and f.filename.lower().endswith(".pdf"):
+            doc_id   = uuid.uuid4().hex[:10]
+            dest     = os.path.join(DOCS_DIR, f"{doc_id}_{f.filename}")
+            f.save(dest)
+            conn.execute("""
+                INSERT INTO contractor_docs (id, contractor_name, doc_type, original_name, file_path, uploaded_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (doc_id, contractor_name, doc_type, f.filename, dest,
+                  datetime.now().strftime("%Y-%m-%d %H:%M")))
+
+    _store_doc("fringe_plan_pdf",    "fringe_plan")
+    _store_doc("apprentice_pdf",     "apprentice")
+    _store_doc("wage_deduction_pdf", "wage_deduction")
+
     conn.commit()
     conn.close()
 
@@ -443,6 +437,32 @@ def delete_audit(audit_id):
         conn.commit()
         flash("Audit deleted.", "info")
 
+    conn.close()
+    return redirect(url_for("index"))
+
+
+@app.route("/docs/<doc_id>/view")
+def view_doc(doc_id):
+    conn = get_db()
+    doc  = conn.execute("SELECT * FROM contractor_docs WHERE id = ?", (doc_id,)).fetchone()
+    conn.close()
+    if not doc or not doc["file_path"] or not os.path.exists(doc["file_path"]):
+        return "Document not found", 404
+    return send_file(doc["file_path"], download_name=doc["original_name"])
+
+
+@app.route("/docs/<doc_id>/delete", methods=["POST"])
+def delete_doc(doc_id):
+    conn = get_db()
+    doc  = conn.execute("SELECT * FROM contractor_docs WHERE id = ?", (doc_id,)).fetchone()
+    if doc:
+        if doc["file_path"] and os.path.exists(doc["file_path"]):
+            try:
+                os.remove(doc["file_path"])
+            except Exception:
+                pass
+        conn.execute("DELETE FROM contractor_docs WHERE id = ?", (doc_id,))
+        conn.commit()
     conn.close()
     return redirect(url_for("index"))
 

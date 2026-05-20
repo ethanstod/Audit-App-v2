@@ -6,10 +6,6 @@
 <!-- Stats row -->
 <div class="stats-grid">
     <div class="stat-card">
-        <div class="stat-label">Total Audits</div>
-        <div class="stat-value">{{ total }}</div>
-    </div>
-    <div class="stat-card">
         <div class="stat-label">Passed</div>
         <div class="stat-value green">{{ total_pass }}</div>
     </div>
@@ -41,6 +37,14 @@
 
     <form id="upload-form" method="POST" action="/upload" enctype="multipart/form-data">
 
+        <!-- Contractor name -->
+        <div class="form-group full" style="margin-bottom:16px;">
+            <label>Contractor Name</label>
+            <input type="text" name="contractor_name" placeholder="e.g. ABC Construction LLC"
+                   style="max-width:420px;">
+            <span class="form-hint">Used to group supporting documents. Auto-filled from the WH-347 if left blank.</span>
+        </div>
+
         <!-- Main WH-347 drop zone -->
         <div class="form-group full" style="margin-bottom: 10px;">
             <div class="drop-zone" id="drop-zone" onclick="document.getElementById('pdf-input').click()">
@@ -53,7 +57,7 @@
                    style="display:none" required>
         </div>
 
-        <!-- Supporting document boxes — directly below the main drop zone -->
+        <!-- Supporting document boxes -->
         <div class="mini-supp-row">
             <div class="mini-supp-box" id="supp-zone-fringe"
                  onclick="document.getElementById('fringe-plan-input').click()">
@@ -81,156 +85,106 @@
         <input type="file" id="apprentice-input"  name="apprentice_pdf"  accept=".pdf" style="display:none">
         <input type="file" id="deduction-input"   name="wage_deduction_pdf" accept=".pdf" style="display:none">
 
-        <hr class="divider" style="margin-top:20px;">
-
-        <div style="margin-bottom: 16px;">
-            <div class="section-title" style="font-size:14px;">Fringe Benefit Details</div>
-            <p style="font-size:12px;color:var(--muted);margin-top:4px;">
-                Enter the contractor's fringe benefit payment method. Leave blank if fringe is already included in the PDF.
-            </p>
+        <div style="margin-top:20px;">
+            <button type="submit" class="btn btn-primary" id="submit-btn">
+                &#9654; Run Audit
+            </button>
+            <span id="loading-msg" style="display:none;margin-left:14px;font-size:13px;color:var(--muted);">
+                Processing... this may take a few seconds.
+            </span>
         </div>
-
-        <div class="form-grid" style="margin-bottom: 20px;">
-            <div class="form-group">
-                <label>Fringe — Cash in Lieu ($/hr)</label>
-                <input type="number" name="fringe_cash" step="0.01" min="0"
-                       placeholder="0.00">
-                <span class="form-hint">Hourly cash paid to worker in lieu of benefits</span>
-            </div>
-            <div class="form-group">
-                <label>Fringe — Plan Name</label>
-                <input type="text" name="fringe_plan_name"
-                       placeholder="e.g. LIUNA Pension Fund">
-                <span class="form-hint">Name of bona fide benefit plan (29 CFR 5.5(a)(1)(ii))</span>
-            </div>
-            <div class="form-group">
-                <label>Fringe — Plan Amount ($/hr)</label>
-                <input type="number" name="fringe_plan_amount" step="0.01" min="0"
-                       placeholder="0.00">
-                <span class="form-hint">Hourly equivalent of plan contributions</span>
-            </div>
-            <div class="form-group">
-                <label>Submitted By</label>
-                <input type="text" name="submitted_by" placeholder="Your name">
-                <span class="form-hint">Team member uploading this CPR</span>
-            </div>
-        </div>
-
-        <button type="submit" class="btn btn-primary" id="submit-btn">
-            &#9654; Run Audit
-        </button>
-        <span id="loading-msg" style="display:none;margin-left:14px;font-size:13px;color:var(--muted);">
-            Processing... this may take a few seconds.
-        </span>
     </form>
 </div>
 
-<!-- Audit table -->
+<!-- Contractor document library -->
 <div class="card">
     <div class="section-header">
         <div>
-            <div class="section-title">Audit History</div>
-            <div class="section-subtitle">All submitted certified payroll reports</div>
+            <div class="section-title">Supporting Documents by Contractor</div>
+            <div class="section-subtitle">Fringe plans, apprentice registrations, and wage deduction forms — stored by contractor</div>
         </div>
     </div>
 
-    {% if audits %}
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>Submitted</th>
-                    <th>Contractor</th>
-                    <th>Contract #</th>
-                    <th>Week Ending</th>
-                    <th>Payroll #</th>
-                    <th>Workers</th>
-                    <th>Violations</th>
-                    <th>Warnings</th>
-                    <th>Fringe</th>
-                    <th>Supp Docs</th>
-                    <th>Status</th>
-                    <th>Actions</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for a in audits %}
-                <tr>
-                    <td style="white-space:nowrap;">
-                        <div style="font-weight:500;">{{ a.submitted_at }}</div>
-                        <div style="font-size:11px;color:var(--muted);">{{ a.submitted_by }}</div>
-                    </td>
-                    <td style="font-weight:500;max-width:180px;">{{ a.contractor_name }}</td>
-                    <td style="font-family:monospace;font-size:12px;">{{ a.contract_number or '—' }}</td>
-                    <td style="white-space:nowrap;">{{ a.week_ending or '—' }}</td>
-                    <td>{{ a.payroll_number or '—' }}</td>
-                    <td>{{ a.worker_count }}</td>
-                    <td>
-                        {% if a.violation_count > 0 %}
-                            <span style="color:var(--red);font-weight:600;">{{ a.violation_count }}</span>
-                        {% else %}
-                            <span style="color:var(--green);">0</span>
-                        {% endif %}
-                    </td>
-                    <td>
-                        {% if a.warning_count > 0 %}
-                            <span style="color:var(--yellow);font-weight:600;">{{ a.warning_count }}</span>
-                        {% else %}
-                            0
-                        {% endif %}
-                    </td>
-                    <td style="font-size:12px;color:var(--muted);">
-                        {% if a.fringe_cash > 0 %}
-                            Cash ${{ "%.2f"|format(a.fringe_cash) }}/hr<br>
-                        {% endif %}
-                        {% if a.fringe_plan %}
-                            {{ a.fringe_plan }}
-                            {% if a.fringe_plan_amt > 0 %}
-                                (${{ "%.2f"|format(a.fringe_plan_amt) }}/hr)
-                            {% endif %}
-                        {% endif %}
-                        {% if not a.fringe_cash and not a.fringe_plan %}
-                            <span style="color:var(--muted);">From PDF</span>
-                        {% endif %}
-                    </td>
-                    <td style="font-size:11px;white-space:nowrap;">
-                        {% set fp = a.fringe_plan_doc or '' %}
-                        {% set ap = a.apprentice_doc or '' %}
-                        {% set wd = a.wage_deduction_doc or '' %}
-                        <span title="Fringe Plan: {{ fp or 'not provided' }}"
-                              style="color:{% if fp %}var(--green){% else %}var(--muted){% endif %};">&#9632; FP</span>
-                        <span title="Apprentice Form: {{ ap or 'not provided' }}"
-                              style="color:{% if ap %}var(--green){% else %}var(--muted){% endif %}; margin:0 4px;">&#9632; AP</span>
-                        <span title="Wage Deductions: {{ wd or 'not provided' }}"
-                              style="color:{% if wd %}var(--green){% else %}var(--muted){% endif %};">&#9632; WD</span>
-                    </td>
-                    <td>
-                        {% if a.overall_status == 'PASS' %}
-                            <span class="badge badge-pass">PASS</span>
-                        {% elif a.overall_status == 'WARN' %}
-                            <span class="badge badge-warn">WARN</span>
-                        {% else %}
-                            <span class="badge badge-fail">FAIL</span>
-                        {% endif %}
-                    </td>
-                    <td style="white-space:nowrap;">
-                        <a href="/report/{{ a.id }}" class="btn btn-secondary btn-sm">View</a>
-                        <a href="/report/{{ a.id }}/pdf" class="btn btn-secondary btn-sm">PDF</a>
-                        <form method="POST" action="/delete/{{ a.id }}" style="display:inline;"
-                              onsubmit="return confirm('Delete this audit?')">
-                            <button type="submit" class="btn btn-danger btn-sm">Delete</button>
-                        </form>
-                    </td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-    </div>
+    {% if contractors %}
+        {% for contractor_name, doc_groups in contractors.items() %}
+        <div class="contractor-block">
+            <div class="contractor-name">{{ contractor_name }}</div>
+            <div class="doc-slots">
+
+                <!-- Fringe Benefit Plan -->
+                <div class="doc-slot">
+                    <div class="doc-slot-label">Fringe Benefit Plan</div>
+                    {% if doc_groups.fringe_plan %}
+                        {% for doc in doc_groups.fringe_plan %}
+                        <div class="doc-file">
+                            <span class="doc-file-name">{{ doc.original_name }}</span>
+                            <span class="doc-file-date">{{ doc.uploaded_at }}</span>
+                            <div class="doc-actions">
+                                <a href="/docs/{{ doc.id }}/view" class="btn btn-secondary btn-sm" target="_blank">View</a>
+                                <form method="POST" action="/docs/{{ doc.id }}/delete" style="display:inline;"
+                                      onsubmit="return confirm('Delete this document?')">
+                                    <button type="submit" class="btn btn-danger btn-sm">Delete</button>
+                                </form>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    {% else %}
+                        <div class="doc-empty">No document uploaded</div>
+                    {% endif %}
+                </div>
+
+                <!-- Apprentice Registration -->
+                <div class="doc-slot">
+                    <div class="doc-slot-label">Apprentice Registration</div>
+                    {% if doc_groups.apprentice %}
+                        {% for doc in doc_groups.apprentice %}
+                        <div class="doc-file">
+                            <span class="doc-file-name">{{ doc.original_name }}</span>
+                            <span class="doc-file-date">{{ doc.uploaded_at }}</span>
+                            <div class="doc-actions">
+                                <a href="/docs/{{ doc.id }}/view" class="btn btn-secondary btn-sm" target="_blank">View</a>
+                                <form method="POST" action="/docs/{{ doc.id }}/delete" style="display:inline;"
+                                      onsubmit="return confirm('Delete this document?')">
+                                    <button type="submit" class="btn btn-danger btn-sm">Delete</button>
+                                </form>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    {% else %}
+                        <div class="doc-empty">No document uploaded</div>
+                    {% endif %}
+                </div>
+
+                <!-- Wage Deductions -->
+                <div class="doc-slot">
+                    <div class="doc-slot-label">Wage Deductions / Court Docs</div>
+                    {% if doc_groups.wage_deduction %}
+                        {% for doc in doc_groups.wage_deduction %}
+                        <div class="doc-file">
+                            <span class="doc-file-name">{{ doc.original_name }}</span>
+                            <span class="doc-file-date">{{ doc.uploaded_at }}</span>
+                            <div class="doc-actions">
+                                <a href="/docs/{{ doc.id }}/view" class="btn btn-secondary btn-sm" target="_blank">View</a>
+                                <form method="POST" action="/docs/{{ doc.id }}/delete" style="display:inline;"
+                                      onsubmit="return confirm('Delete this document?')">
+                                    <button type="submit" class="btn btn-danger btn-sm">Delete</button>
+                                </form>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    {% else %}
+                        <div class="doc-empty">No document uploaded</div>
+                    {% endif %}
+                </div>
+
+            </div>
+        </div>
+        {% endfor %}
     {% else %}
     <div class="empty-state">
-        <div style="font-size:40px;margin-bottom:12px;">&#128196;</div>
-        <strong>No audits yet</strong>
-        <p>Upload a WH-347 PDF above to run your first compliance audit.</p>
+        <div style="font-size:40px;margin-bottom:12px;">&#128194;</div>
+        <strong>No documents yet</strong>
+        <p>Upload a WH-347 PDF with supporting documents above to get started.</p>
     </div>
     {% endif %}
 </div>
@@ -239,7 +193,6 @@
 
 {% block scripts %}
 <script>
-    // Drag and drop
     const dropZone  = document.getElementById('drop-zone');
     const fileInput = document.getElementById('pdf-input');
     const fileName  = document.getElementById('file-name');
@@ -248,65 +201,41 @@
     const loadingMsg= document.getElementById('loading-msg');
 
     fileInput.addEventListener('change', () => {
-        if (fileInput.files[0]) {
-            fileName.textContent = fileInput.files[0].name;
-        }
+        if (fileInput.files[0]) fileName.textContent = fileInput.files[0].name;
     });
-
-    dropZone.addEventListener('dragover', e => {
-        e.preventDefault();
-        dropZone.classList.add('dragover');
-    });
-    dropZone.addEventListener('dragleave', () => {
-        dropZone.classList.remove('dragover');
-    });
+    dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
     dropZone.addEventListener('drop', e => {
         e.preventDefault();
         dropZone.classList.remove('dragover');
         const file = e.dataTransfer.files[0];
         if (file && file.name.toLowerCase().endsWith('.pdf')) {
-            const dt = new DataTransfer();
-            dt.items.add(file);
+            const dt = new DataTransfer(); dt.items.add(file);
             fileInput.files = dt.files;
             fileName.textContent = file.name;
-        } else {
-            alert('Please drop a PDF file.');
-        }
+        } else { alert('Please drop a PDF file.'); }
     });
-
-    // Show loading state on submit
     form.addEventListener('submit', () => {
         submitBtn.disabled = true;
         submitBtn.textContent = 'Running Audit...';
         loadingMsg.style.display = 'inline';
     });
 
-    // Mini supporting document boxes
     function setupMiniBox(zoneId, inputId, nameId) {
         const zone  = document.getElementById(zoneId);
         const input = document.getElementById(inputId);
         const name  = document.getElementById(nameId);
-
         function setFile(file) {
-            if (!file || !file.name.toLowerCase().endsWith('.pdf')) {
-                alert('Please drop a PDF file.');
-                return;
-            }
-            const dt = new DataTransfer();
-            dt.items.add(file);
+            if (!file || !file.name.toLowerCase().endsWith('.pdf')) { alert('Please drop a PDF file.'); return; }
+            const dt = new DataTransfer(); dt.items.add(file);
             input.files = dt.files;
             name.textContent = file.name;
             zone.classList.add('has-file');
         }
-
         input.addEventListener('change', () => { if (input.files[0]) setFile(input.files[0]); });
         zone.addEventListener('dragover',  e => { e.preventDefault(); zone.classList.add('dragover'); });
         zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
-        zone.addEventListener('drop', e => {
-            e.preventDefault();
-            zone.classList.remove('dragover');
-            setFile(e.dataTransfer.files[0]);
-        });
+        zone.addEventListener('drop', e => { e.preventDefault(); zone.classList.remove('dragover'); setFile(e.dataTransfer.files[0]); });
     }
 
     setupMiniBox('supp-zone-fringe',     'fringe-plan-input', 'supp-name-fringe');

@@ -414,6 +414,80 @@
             .mini-supp-row { grid-template-columns: 1fr; }
         }
 
+        /* Contractor document library */
+        .contractor-block {
+            border-bottom: 1px solid var(--border);
+            padding: 18px 0;
+        }
+        .contractor-block:last-child { border-bottom: none; }
+        .contractor-name {
+            font-size: 15px;
+            font-weight: 700;
+            color: var(--text);
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .contractor-name::before {
+            content: '';
+            display: inline-block;
+            width: 4px;
+            height: 16px;
+            background: var(--accent);
+            border-radius: 2px;
+        }
+        .doc-slots {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 12px;
+        }
+        .doc-slot {
+            background: #f8fafc;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 12px;
+        }
+        .doc-slot-label {
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--muted);
+            margin-bottom: 8px;
+        }
+        .doc-file {
+            background: white;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 8px 10px;
+            margin-bottom: 6px;
+        }
+        .doc-file-name {
+            display: block;
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text);
+            word-break: break-all;
+            margin-bottom: 2px;
+        }
+        .doc-file-date {
+            display: block;
+            font-size: 10px;
+            color: var(--muted);
+            margin-bottom: 6px;
+        }
+        .doc-actions { display: flex; gap: 4px; }
+        .doc-empty {
+            font-size: 11px;
+            color: var(--muted);
+            font-style: italic;
+            padding: 6px 2px;
+        }
+        @media (max-width: 700px) {
+            .doc-slots { grid-template-columns: 1fr; }
+        }
+
         /* Update banner */
         .update-banner {
             background: #92400e;
