@@ -9,6 +9,7 @@ When compiled with PyInstaller this IS the exe.
 
 import sys
 import os
+import subprocess
 import threading
 import webbrowser
 import time
@@ -32,6 +33,30 @@ from app import app as flask_app  # noqa: E402  (import after env setup)
 # ---------------------------------------------------------------------------
 PORT = 5000
 URL  = f"http://127.0.0.1:{PORT}"
+
+
+def _open_window():
+    """Open in a standalone app window (Edge/Chrome app mode) — no browser tabs."""
+    _edge = [
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    ]
+    _chrome = [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+    ]
+    _flags = [f"--app={URL}", "--window-size=1280,900", "--disable-extensions"]
+
+    for exe in _edge + _chrome:
+        if os.path.exists(exe):
+            try:
+                subprocess.Popen([exe] + _flags)
+                return
+            except Exception:
+                continue
+
+    webbrowser.open_new(URL)
 
 
 def _server_up() -> bool:
@@ -70,7 +95,7 @@ def _run_tray():
         import pystray
 
         def on_open(icon, item):
-            webbrowser.open(URL)
+            _open_window()
 
         def on_exit(icon, item):
             icon.stop()
