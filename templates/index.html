@@ -14,14 +14,20 @@
         <div class="stat-value green">{{ total_pass }}</div>
     </div>
     <div class="stat-card">
+        <div class="stat-label">Warnings Only</div>
+        <div class="stat-value" style="color:var(--yellow);">{{ total_warn }}</div>
+    </div>
+    <div class="stat-card">
         <div class="stat-label">Failed</div>
         <div class="stat-value red">{{ total_fail }}</div>
     </div>
+    {% if wage_det.number %}
     <div class="stat-card">
         <div class="stat-label">Wage Determination</div>
-        <div style="font-size:15px;font-weight:700;margin-top:4px;">CA2024-0234</div>
-        <div style="font-size:11px;color:var(--muted);margin-top:2px;">Highway / Stanislaus County</div>
+        <div style="font-size:15px;font-weight:700;margin-top:4px;">{{ wage_det.number }}</div>
+        {% if wage_det.type %}<div style="font-size:11px;color:var(--muted);margin-top:2px;">{{ wage_det.type }}</div>{% endif %}
     </div>
+    {% endif %}
 </div>
 
 <!-- Upload form -->
@@ -45,6 +51,68 @@
             </div>
             <input type="file" id="pdf-input" name="pdf" accept=".pdf"
                    style="display:none" required>
+        </div>
+
+        <hr class="divider">
+
+        <!-- Supporting Documents — 3 columns -->
+        <div style="margin-bottom: 16px;">
+            <div class="section-title" style="font-size:14px;">Supporting Documents</div>
+            <p style="font-size:12px;color:var(--muted);margin-top:4px;">
+                Drag PDFs exported from LCPtracker into each slot. These are processed for the audit record and not stored on the server.
+            </p>
+        </div>
+
+        <div class="supp-grid">
+
+            <!-- Column 1: Fringe Plan -->
+            <div class="supp-col">
+                <div class="supp-col-header">
+                    <div class="supp-col-title">Fringe Benefit Plan</div>
+                    <div class="supp-col-reg">29 CFR 5.5(a)(1)(ii)</div>
+                </div>
+                <div class="supp-zone" id="supp-zone-fringe"
+                     onclick="document.getElementById('fringe-plan-input').click()">
+                    <div class="supp-zone-icon">PDF</div>
+                    <div class="supp-zone-hint">Drop plan document here</div>
+                    <div class="supp-zone-name" id="supp-name-fringe"></div>
+                </div>
+                <input type="file" id="fringe-plan-input" name="fringe_plan_pdf"
+                       accept=".pdf" style="display:none">
+            </div>
+
+            <!-- Column 2: Apprentice Form -->
+            <div class="supp-col">
+                <div class="supp-col-header">
+                    <div class="supp-col-title">Apprentice Registration</div>
+                    <div class="supp-col-reg">29 CFR 5.5(a)(4)</div>
+                </div>
+                <div class="supp-zone" id="supp-zone-apprentice"
+                     onclick="document.getElementById('apprentice-input').click()">
+                    <div class="supp-zone-icon">PDF</div>
+                    <div class="supp-zone-hint">Drop apprentice form here</div>
+                    <div class="supp-zone-name" id="supp-name-apprentice"></div>
+                </div>
+                <input type="file" id="apprentice-input" name="apprentice_pdf"
+                       accept=".pdf" style="display:none">
+            </div>
+
+            <!-- Column 3: Wage Deductions / Court Docs -->
+            <div class="supp-col">
+                <div class="supp-col-header">
+                    <div class="supp-col-title">Wage Deductions / Court Docs</div>
+                    <div class="supp-col-reg">Copeland Act; 29 CFR 3.5</div>
+                </div>
+                <div class="supp-zone" id="supp-zone-deduction"
+                     onclick="document.getElementById('deduction-input').click()">
+                    <div class="supp-zone-icon">PDF</div>
+                    <div class="supp-zone-hint">Drop court orders / deduction auth here</div>
+                    <div class="supp-zone-name" id="supp-name-deduction"></div>
+                </div>
+                <input type="file" id="deduction-input" name="wage_deduction_pdf"
+                       accept=".pdf" style="display:none">
+            </div>
+
         </div>
 
         <hr class="divider">
@@ -114,6 +182,7 @@
                     <th>Violations</th>
                     <th>Warnings</th>
                     <th>Fringe</th>
+                    <th>Supp Docs</th>
                     <th>Status</th>
                     <th>Actions</th>
                 </tr>
@@ -158,9 +227,22 @@
                             <span style="color:var(--muted);">From PDF</span>
                         {% endif %}
                     </td>
+                    <td style="font-size:11px;white-space:nowrap;">
+                        {% set fp = a.fringe_plan_doc or '' %}
+                        {% set ap = a.apprentice_doc or '' %}
+                        {% set wd = a.wage_deduction_doc or '' %}
+                        <span title="Fringe Plan: {{ fp or 'not provided' }}"
+                              style="color:{% if fp %}var(--green){% else %}var(--muted){% endif %};">&#9632; FP</span>
+                        <span title="Apprentice Form: {{ ap or 'not provided' }}"
+                              style="color:{% if ap %}var(--green){% else %}var(--muted){% endif %}; margin:0 4px;">&#9632; AP</span>
+                        <span title="Wage Deductions: {{ wd or 'not provided' }}"
+                              style="color:{% if wd %}var(--green){% else %}var(--muted){% endif %};">&#9632; WD</span>
+                    </td>
                     <td>
                         {% if a.overall_status == 'PASS' %}
                             <span class="badge badge-pass">PASS</span>
+                        {% elif a.overall_status == 'WARN' %}
+                            <span class="badge badge-warn">WARN</span>
                         {% else %}
                             <span class="badge badge-fail">FAIL</span>
                         {% endif %}
@@ -232,5 +314,43 @@
         submitBtn.textContent = 'Running Audit...';
         loadingMsg.style.display = 'inline';
     });
+
+    // Supplementary document drop zones
+    function setupSuppZone(zoneId, inputId, nameId) {
+        const zone  = document.getElementById(zoneId);
+        const input = document.getElementById(inputId);
+        const name  = document.getElementById(nameId);
+
+        function setFile(file) {
+            if (!file || !file.name.toLowerCase().endsWith('.pdf')) {
+                alert('Please drop a PDF file.');
+                return;
+            }
+            const dt = new DataTransfer();
+            dt.items.add(file);
+            input.files = dt.files;
+            name.textContent = file.name;
+            zone.classList.add('has-file');
+        }
+
+        input.addEventListener('change', () => {
+            if (input.files[0]) setFile(input.files[0]);
+        });
+
+        zone.addEventListener('dragover', e => {
+            e.preventDefault();
+            zone.classList.add('dragover');
+        });
+        zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
+        zone.addEventListener('drop', e => {
+            e.preventDefault();
+            zone.classList.remove('dragover');
+            setFile(e.dataTransfer.files[0]);
+        });
+    }
+
+    setupSuppZone('supp-zone-fringe',     'fringe-plan-input', 'supp-name-fringe');
+    setupSuppZone('supp-zone-apprentice', 'apprentice-input',  'supp-name-apprentice');
+    setupSuppZone('supp-zone-deduction',  'deduction-input',   'supp-name-deduction');
 </script>
 {% endblock %}

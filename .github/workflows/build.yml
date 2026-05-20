@@ -1,0 +1,51 @@
+name: Build Windows App
+
+# Triggers on any tag pushed like: git tag v1.0.0 && git push --tags
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller waitress pystray pillow
+
+      - name: Build with PyInstaller
+        run: pyinstaller wh347_audit.spec --clean --noconfirm
+
+      - name: Zip output folder
+        run: |
+          Compress-Archive -Path "dist\WH347 Audit Engine\*" `
+                           -DestinationPath "WH347-Audit-Engine-Windows.zip"
+        shell: powershell
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "WH-347 Audit Engine ${{ github.ref_name }}"
+          body: |
+            ## Installation
+
+            1. Download **WH347-Audit-Engine-Windows.zip** below
+            2. Extract the zip to any folder (e.g. `C:\WH347 Audit Engine\`)
+            3. Double-click **WH347 Audit Engine.exe**
+            4. The app opens in your browser automatically
+            5. A tray icon appears — right-click it to reopen or exit
+
+            ## Updating the wage determination
+            Replace `cleaned_rates.xlsx` in the extracted folder with your new file.
+          files: WH347-Audit-Engine-Windows.zip

@@ -341,6 +341,64 @@ def _section_apprentice_ratios(apprentice_results):
     """
 
 
+def _section_supporting_docs(supp_docs):
+    if not supp_docs:
+        return ""
+
+    items = [
+        ("Fringe Benefit Plan",
+         supp_docs.get("fringe_plan_doc", ""),
+         "29 CFR 5.5(a)(1)(ii)",
+         "Bona fide plan documentation required to credit fringe contributions"),
+        ("Apprentice Registration Form",
+         supp_docs.get("apprentice_doc", ""),
+         "29 CFR 5.5(a)(4)",
+         "DOL-registered apprenticeship program record"),
+        ("Wage Deduction / Court Documents",
+         supp_docs.get("wage_deduction_doc", ""),
+         "Copeland Act; 29 CFR 3.5",
+         "Authorized deduction records (garnishments, child support orders, etc.)"),
+    ]
+
+    rows = ""
+    for label, filename, reg, desc in items:
+        if filename:
+            status = _badge("PASS")
+            display = filename
+        else:
+            status = _badge("WARN")
+            display = "(not provided)"
+        rows += f"""
+        <tr>
+            <td style="font-weight:600">{label}</td>
+            <td style="font-family:monospace;font-size:12px">{display}</td>
+            <td>{status}</td>
+            <td style="font-size:12px;color:#666">{desc}</td>
+            <td style="font-size:11px;color:#888">{reg}</td>
+        </tr>"""
+
+    return f"""
+    <section>
+        <h2>7. Supporting Documents</h2>
+        <p style="font-size:12px;color:#666;margin-bottom:12px;">
+            Supporting documents are logged for the audit record.
+            Automated parsing and cross-validation of these documents
+            will be available in a future update.
+        </p>
+        <table>
+            <tr>
+                <th>Document Type</th>
+                <th>File Submitted</th>
+                <th>Status</th>
+                <th>Purpose</th>
+                <th>Regulation</th>
+            </tr>
+            {rows}
+        </table>
+    </section>
+    """
+
+
 def _section_regulation_reference():
     rows = "".join(
         f"<tr><td style='font-family:monospace;font-size:12px'>{cite}</td>"
@@ -379,9 +437,10 @@ def generate_wh347_html_report(report_data, output_path=None):
     if output_path is None:
         output_path = os.path.join(os.getcwd(), "report_wh347.html")
 
-    # All audit result dicts in a list (for per-row combination)
+    # All audit result dicts in a list (for per-row combination and violations section)
     audit_results_list = [
         r for r in [
+            report_data.get("header_audit"),
             report_data.get("math"),
             report_data.get("cwhssa"),
             report_data.get("pay"),
@@ -398,7 +457,8 @@ def generate_wh347_html_report(report_data, output_path=None):
     sec3 = _section_worker_detail(workers, audit_results_list)
     sec4 = _section_violations(audit_results_list)
     sec5 = _section_apprentice_ratios(report_data.get("apprentice"))
-    sec6 = _section_regulation_reference()
+    sec6 = _section_supporting_docs(report_data.get("supp_docs"))
+    sec7 = _section_regulation_reference()
 
     overall_color = "#28a745" if overall_pass else "#dc3545"
     overall_label = "PASS" if overall_pass else "FAIL"
@@ -510,6 +570,7 @@ def generate_wh347_html_report(report_data, output_path=None):
     {sec4}
     {sec5}
     {sec6}
+    {sec7}
 
     <footer style="text-align:center;color:#adb5bd;font-size:11px;margin-top:30px;padding:10px;">
         WH-347 Federal Compliance Audit Engine &nbsp;|&nbsp;

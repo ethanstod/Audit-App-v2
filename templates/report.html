@@ -80,6 +80,8 @@
             <span class="meta-value">
                 {% if audit.overall_status == 'PASS' %}
                     <span class="badge badge-pass">PASS</span>
+                {% elif audit.overall_status == 'WARN' %}
+                    <span class="badge badge-warn">WARN</span>
                 {% else %}
                     <span class="badge badge-fail">FAIL</span>
                 {% endif %}

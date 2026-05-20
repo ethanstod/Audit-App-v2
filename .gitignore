@@ -25,3 +25,11 @@ __pycache__/
 desktop.ini
 .DS_Store
 Thumbs.db
+
+# PyInstaller build output (GitHub Actions builds these)
+dist/
+build/
+*.spec.bak
+
+# Claude Code internal
+.claude/

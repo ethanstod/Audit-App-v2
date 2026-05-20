@@ -504,6 +504,247 @@ def extract_compliance_statement(pdf_path):
 
 
 # ---------------------------------------------------------------------------
+# Simple 10-column custom WH-347 format
+# (2-col header table + 10-col worker table per page)
+# ---------------------------------------------------------------------------
+
+def _is_simple10_format(pdf_path):
+    """
+    Returns True if the PDF uses the simple 10-col custom format:
+      Page 1 has a 2-col key-value header table followed by a 10-col worker table.
+    """
+    with pdfplumber.open(pdf_path) as pdf:
+        if not pdf.pages:
+            return False
+        tables = pdf.pages[0].extract_tables()
+        if len(tables) < 2:
+            return False
+        # First table: 2 cols, first cell is a label ending with ':'
+        t0 = tables[0]
+        if not t0 or not t0[0] or len(t0[0]) != 2:
+            return False
+        cell = str(t0[0][0] or '').strip()
+        if ':' not in cell:
+            return False
+        # Second table: exactly 10 cols with numeric first column on data rows
+        t1 = tables[1]
+        if not t1 or not t1[0] or len(t1[0]) != 10:
+            return False
+        return True
+
+
+def _extract_simple10_data(pdf_path):
+    """
+    Parses the simple 10-column custom WH-347 format.
+
+    Page 1 Table 0 (2-col): key-value header pairs
+    Pages 1-N Table 1 (10-col): worker rows
+      [0]=row#  [1]=name(Last, First)  [2]=classification
+      [3]=ST hrs  [4]=OT hrs  [5]=total hrs  [6]=ST rate
+      [7]=gross  [8]=deductions  [9]=net
+    Last page: 2-col compliance statement table
+    """
+
+    def sf(val):
+        try:
+            return float(re.sub(r'[\s,]', '', str(val or '')))
+        except (ValueError, TypeError):
+            return 0.0
+
+    def cl(val):
+        if val is None:
+            return ''
+        return re.sub(r'\s+', ' ', str(val)).strip()
+
+    header = {
+        'contractor_name':           '',
+        'contractor_address':        '',
+        'payroll_number':            '',
+        'week_ending':               '',
+        'project_name':              '',
+        'project_location':          '',
+        'contract_number':           '',
+        'wage_determination_number': '',
+    }
+    compliance_statement = {
+        'certified_signature': False,
+        'certified_name':      '',
+        'certified_title':     '',
+        'certified_date':      '',
+        'detected_by_text':    False,
+    }
+
+    # Map 2-col label → header field
+    LABEL_MAP = {
+        'project name':           'project_name',
+        'project no':             'contract_number',
+        'contract no':            'contract_number',
+        'certified payroll no':   'payroll_number',
+        'payroll no':             'payroll_number',
+        'prime contractor':       'contractor_name',
+        'contractor':             'contractor_name',
+        'project location':       'project_location',
+        'location':               'project_location',
+        'wage determination no':  'wage_determination_number',
+        'wage det no':            'wage_determination_number',
+        'week ending date':       'week_ending',
+        'week ending':            'week_ending',
+        'address':                'contractor_address',
+    }
+    COMPLIANCE_MAP = {
+        'certifying official': ('certified_name', 'certified_title'),
+        'date':                ('certified_date', None),
+    }
+
+    parsed_rows = []
+
+    with pdfplumber.open(pdf_path) as pdf:
+        for page_num, page in enumerate(pdf.pages, 1):
+            tables = page.extract_tables()
+
+            for table in tables:
+                if not table or not table[0]:
+                    continue
+                num_cols = len(table[0])
+
+                # ----------------------------------------------------------
+                # 2-column table: header or compliance key-value pairs
+                # ----------------------------------------------------------
+                if num_cols == 2:
+                    for row in table:
+                        if not row or len(row) < 2:
+                            continue
+                        label = cl(row[0]).rstrip(':').lower()
+                        value = cl(row[1])
+                        if not value:
+                            continue
+
+                        # Header fields
+                        for key, field in LABEL_MAP.items():
+                            if label.startswith(key):
+                                if not header[field]:
+                                    header[field] = value
+                                break
+
+                        # Compliance fields
+                        if label.startswith('certifying official'):
+                            # May be "Name — Title" or "Name, Title"
+                            for sep in ['\u2013', '\u2014', '/', ',']:
+                                if sep in value:
+                                    parts = [p.strip() for p in value.split(sep, 1)]
+                                    compliance_statement['certified_name']  = parts[0]
+                                    compliance_statement['certified_title'] = parts[1] if len(parts) > 1 else ''
+                                    break
+                            else:
+                                compliance_statement['certified_name'] = value
+                            compliance_statement['certified_signature'] = True
+                            compliance_statement['detected_by_text']    = True
+
+                        elif label == 'date':
+                            if re.search(r'\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}', value):
+                                compliance_statement['certified_date']      = value
+                                compliance_statement['certified_signature'] = True
+                                compliance_statement['detected_by_text']    = True
+
+                # ----------------------------------------------------------
+                # 10-column table: worker data rows
+                # ----------------------------------------------------------
+                elif num_cols == 10:
+                    for row in table:
+                        if not row:
+                            continue
+                        cell0 = cl(row[0])
+                        # Skip header rows (non-numeric first cell)
+                        if not cell0.isdigit():
+                            continue
+
+                        row_number     = int(cell0)
+                        full_name      = cl(row[1])
+                        classification = cl(row[2])
+                        st_hours       = sf(row[3])
+                        ot_hours       = sf(row[4])
+                        total_hours    = sf(row[5])
+                        st_rate        = sf(row[6])
+                        gross          = sf(row[7])
+                        deductions     = sf(row[8])
+                        net            = sf(row[9])
+
+                        # Parse "Last, First" name
+                        if ',' in full_name:
+                            parts = full_name.split(',', 1)
+                            last_name  = parts[0].strip().title()
+                            first_name = parts[1].strip().title()
+                        else:
+                            name_parts = full_name.split()
+                            last_name  = name_parts[-1].title() if name_parts else full_name
+                            first_name = ' '.join(name_parts[:-1]).title() if len(name_parts) > 1 else ''
+
+                        # Determine J/RA from classification
+                        cls_upper = classification.upper()
+                        if 'APPRENTICE' in cls_upper or '(RA)' in cls_upper:
+                            j_ra = 'RA'
+                        else:
+                            j_ra = 'J'
+
+                        # Compute rates
+                        ot_rate = round(st_rate * 1.5, 2)
+                        dt_rate = round(st_rate * 2.0, 2)
+                        dt_hours = round(max(total_hours - st_hours - ot_hours, 0.0), 2)
+
+                        # Compute gross components
+                        ot_gross  = round(ot_hours * ot_rate, 2)
+                        dt_gross  = round(dt_hours * dt_rate, 2)
+                        st_gross  = round(max(gross - ot_gross - dt_gross, 0.0), 2)
+
+                        parsed_rows.append({
+                            'row_number':              row_number,
+                            'last_name':               last_name,
+                            'first_name':              first_name,
+                            'middle_initial':           '',
+                            'worker_id':               '',
+                            'j_ra':                    j_ra,
+                            'classification':          classification,
+                            'st_hours':                st_hours,
+                            'ot_hours':                ot_hours,
+                            'dt_hours':                dt_hours,
+                            'total_hours':             total_hours,
+                            'st_rate':                 st_rate,
+                            'ot_rate':                 ot_rate,
+                            'dt_rate':                 dt_rate,
+                            'rate':                    st_rate,
+                            'st_gross':                st_gross,
+                            'ot_gross':                ot_gross,
+                            'dt_gross':                dt_gross,
+                            'gross':                   gross,
+                            'fica':                    0.0,
+                            'withholding':             0.0,
+                            'deductions':              deductions,
+                            'net':                     net,
+                            'fringe_paid_cash':        0.0,
+                            'fringe_plan_name':        '',
+                            'fringe_plan_amount':      0.0,
+                            'apprentice_program_name': '',
+                            'apprentice_period':       0,
+                            'apprentice_percent':      0.0,
+                        })
+
+    journeymen  = sum(1 for w in parsed_rows if w['j_ra'] == 'J')
+    apprentices = sum(1 for w in parsed_rows if w['j_ra'] == 'RA')
+
+    return {
+        'header':  header,
+        'lines':   parsed_rows,
+        'totals': {
+            'workers':     len(parsed_rows),
+            'journeymen':  journeymen,
+            'apprentices': apprentices,
+            'total_gross': round(sum(w['gross'] for w in parsed_rows), 2),
+        },
+        'compliance_statement': compliance_statement,
+    }
+
+
+# ---------------------------------------------------------------------------
 # iTextSharp multi-page WH-347 format (27-col / 26-col with ST/OT/DT sub-rows)
 # ---------------------------------------------------------------------------
 
@@ -659,9 +900,11 @@ def _extract_itextsharp_data(pdf_path):
                     total_h_col = 16
                     rate_col    = 17
                     fringe_c_col= 18
+                    cumul_g_col = 21
                     week_g_col  = 20
                     withhold_col= 22
                     fica_col    = 23
+                    other_d_col = 24
                     total_d_col = 25
                     net_col     = 26
                 elif row_len >= 26:
@@ -674,9 +917,11 @@ def _extract_itextsharp_data(pdf_path):
                     total_h_col = 15
                     rate_col    = 16
                     fringe_c_col= 17
+                    cumul_g_col = 20
                     week_g_col  = 19
                     withhold_col= 21
                     fica_col    = 22
+                    other_d_col = 23
                     total_d_col = 24
                     net_col     = 25
                 else:
@@ -724,8 +969,12 @@ def _extract_itextsharp_data(pdf_path):
                         'gross':                   0.0,
                         'fica':                    0.0,
                         'withholding':             0.0,
+                        'other_deductions':        0.0,
                         'deductions':              0.0,
                         'net':                     0.0,
+                        'cumul_gross':             0.0,
+                        'cumul_deductions':        0.0,
+                        'cumul_net':               0.0,
                         'fringe_paid_cash':        0.0,
                         'fringe_plan_name':        '',
                         'fringe_plan_amount':      0.0,
@@ -752,9 +1001,13 @@ def _extract_itextsharp_data(pdf_path):
                     w['fringe_paid_cash']= sf(row[fringe_c_col]) if fringe_c_col < row_len else 0.0
                     # Deductions on this form are cumulative (YTD), not weekly.
                     # Set deductions=0 and net=gross so math audit check #2 passes
-                    # without spurious failures. Store FICA/withholding for reference.
-                    w['fica']            = sf(row[fica_col])     if fica_col     < row_len else 0.0
+                    # without spurious failures. Store all deduction fields for reporting.
                     w['withholding']     = sf(row[withhold_col]) if withhold_col < row_len else 0.0
+                    w['fica']            = sf(row[fica_col])     if fica_col     < row_len else 0.0
+                    w['other_deductions']= sf(row[other_d_col])  if other_d_col  < row_len else 0.0
+                    w['cumul_gross']     = sf(row[cumul_g_col])  if cumul_g_col  < row_len else 0.0
+                    w['cumul_deductions']= sf(row[total_d_col])  if total_d_col  < row_len else 0.0
+                    w['cumul_net']       = sf(row[net_col])      if net_col      < row_len else 0.0
                     w['deductions']      = 0.0
                     w['net']             = w['gross']
 
@@ -820,12 +1073,6 @@ def extract_wh347_data(pdf_path):
     if not os.path.exists(pdf_path):
         raise FileNotFoundError(f'File not found: {pdf_path}')
 
-    def safe_float(val):
-        try:
-            return float(str(val).replace(',', '').strip())
-        except (ValueError, TypeError):
-            return 0.0
-
     def clean_cell(cell):
         return str(cell).strip() if cell else ''
 
@@ -840,7 +1087,17 @@ def extract_wh347_data(pdf_path):
         print(f'[!] iTextSharp parser error: {e} -- falling back')
 
     # -------------------------------------------------------------------------
-    # Attempt 2: FreeText annotation extraction (Jan 2025 DOL official form)
+    # Attempt 2: Simple 10-column custom format (2-col header + 10-col workers)
+    # -------------------------------------------------------------------------
+    try:
+        if _is_simple10_format(pdf_path):
+            print('[*] Detected simple 10-col WH-347 format -- using key-value parser')
+            return _extract_simple10_data(pdf_path)
+    except Exception as e:
+        print(f'[!] Simple 10-col parser error: {e} -- falling back')
+
+    # -------------------------------------------------------------------------
+    # Attempt 3: FreeText annotation extraction (Jan 2025 DOL official form)
     # -------------------------------------------------------------------------
     parsed_rows = []
     header = {}
@@ -868,7 +1125,7 @@ def extract_wh347_data(pdf_path):
         print(f'[!] FreeText extraction error: {e} -- trying table mode')
 
     # -------------------------------------------------------------------------
-    # Attempt 3: pdfplumber table extraction
+    # Attempt 4: pdfplumber table extraction
     # -------------------------------------------------------------------------
     if not parsed_rows:
         with pdfplumber.open(pdf_path) as pdf:
@@ -894,34 +1151,34 @@ def extract_wh347_data(pdf_path):
 
                             num_cols = len(cleaned)
                             if num_cols >= 20:
-                                st_hours = safe_float(cleaned[7])
-                                st_rate = safe_float(cleaned[8])
-                                st_gross = safe_float(cleaned[9])
-                                ot_hours = safe_float(cleaned[10])
-                                ot_rate = safe_float(cleaned[11])
-                                ot_gross = safe_float(cleaned[12])
-                                dt_hours = safe_float(cleaned[13])
-                                dt_rate = safe_float(cleaned[14])
-                                dt_gross = safe_float(cleaned[15])
-                                total_hours = safe_float(cleaned[16])
-                                gross = safe_float(cleaned[17])
-                                deductions = safe_float(cleaned[18])
-                                net = safe_float(cleaned[19])
-                                fringe_cash = safe_float(cleaned[20]) if num_cols > 20 else 0.0
+                                st_hours = _safe_float(cleaned[7])
+                                st_rate = _safe_float(cleaned[8])
+                                st_gross = _safe_float(cleaned[9])
+                                ot_hours = _safe_float(cleaned[10])
+                                ot_rate = _safe_float(cleaned[11])
+                                ot_gross = _safe_float(cleaned[12])
+                                dt_hours = _safe_float(cleaned[13])
+                                dt_rate = _safe_float(cleaned[14])
+                                dt_gross = _safe_float(cleaned[15])
+                                total_hours = _safe_float(cleaned[16])
+                                gross = _safe_float(cleaned[17])
+                                deductions = _safe_float(cleaned[18])
+                                net = _safe_float(cleaned[19])
+                                fringe_cash = _safe_float(cleaned[20]) if num_cols > 20 else 0.0
                             else:
-                                st_hours = safe_float(cleaned[7]) if len(cleaned) > 7 else 0.0
-                                ot_hours = safe_float(cleaned[8]) if len(cleaned) > 8 else 0.0
-                                dt_hours = safe_float(cleaned[9]) if len(cleaned) > 9 else 0.0
-                                total_hours = safe_float(cleaned[10]) if len(cleaned) > 10 else 0.0
-                                st_rate = safe_float(cleaned[11]) if len(cleaned) > 11 else 0.0
+                                st_hours = _safe_float(cleaned[7]) if len(cleaned) > 7 else 0.0
+                                ot_hours = _safe_float(cleaned[8]) if len(cleaned) > 8 else 0.0
+                                dt_hours = _safe_float(cleaned[9]) if len(cleaned) > 9 else 0.0
+                                total_hours = _safe_float(cleaned[10]) if len(cleaned) > 10 else 0.0
+                                st_rate = _safe_float(cleaned[11]) if len(cleaned) > 11 else 0.0
                                 ot_rate = round(st_rate * 1.5, 2)
                                 dt_rate = round(st_rate * 2.0, 2)
-                                gross = safe_float(cleaned[12]) if len(cleaned) > 12 else 0.0
+                                gross = _safe_float(cleaned[12]) if len(cleaned) > 12 else 0.0
                                 st_gross = gross
                                 ot_gross = 0.0
                                 dt_gross = 0.0
-                                deductions = safe_float(cleaned[13]) if len(cleaned) > 13 else 0.0
-                                net = safe_float(cleaned[14]) if len(cleaned) > 14 else 0.0
+                                deductions = _safe_float(cleaned[13]) if len(cleaned) > 13 else 0.0
+                                net = _safe_float(cleaned[14]) if len(cleaned) > 14 else 0.0
                                 fringe_cash = 0.0
 
                         except Exception:
@@ -958,7 +1215,7 @@ def extract_wh347_data(pdf_path):
                         })
 
     # -------------------------------------------------------------------------
-    # Attempt 4: Fallback text parser
+    # Attempt 5: Fallback text parser
     # -------------------------------------------------------------------------
     if not parsed_rows:
         print('[!] No structured data found -- using fallback text parser.')
@@ -1011,7 +1268,7 @@ def extract_wh347_data(pdf_path):
                 nums = re.findall(r'\d+\.\d+', line)
                 if len(nums) < 5:
                     continue
-                nums = [safe_float(n) for n in nums]
+                nums = [_safe_float(n) for n in nums]
                 record = {
                     'hours': nums[-5], 'rate': nums[-4], 'gross': nums[-3],
                     'deductions': nums[-2], 'net': nums[-1],
