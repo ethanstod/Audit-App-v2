@@ -17,6 +17,7 @@ a = Analysis(
     datas=[
         ("templates",          "templates"),
         ("cleaned_rates.xlsx", "."),
+        ("version.txt",        "."),
     ] + pdfminer_d + pdfplumber_d + webview_d,
     hiddenimports=[
         # Audit modules

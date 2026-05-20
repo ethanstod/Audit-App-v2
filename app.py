@@ -2,7 +2,13 @@ import os
 import sys
 import sqlite3
 import uuid
+import threading
+import subprocess
+import tempfile
+import json
 from datetime import datetime
+from urllib.request import urlopen, urlretrieve, Request as URLRequest
+from urllib.error import URLError
 
 import pandas as pd
 from flask import (Flask, render_template, request, redirect,
@@ -72,6 +78,54 @@ def _load_wage_det_info():
         return {"number": "", "type": ""}
 
 WAGE_DET_INFO = _load_wage_det_info()
+
+
+# ---------------------------------------------------------------------------
+# Auto-update
+# ---------------------------------------------------------------------------
+
+def _read_version():
+    for loc in (os.path.join(_DATA_DIR, "version.txt"),
+                os.path.join(_RESOURCE_DIR, "version.txt")):
+        try:
+            with open(loc) as f:
+                return f.read().strip()
+        except Exception:
+            continue
+    return "0.0.0"
+
+APP_VERSION = _read_version()
+
+_update_info = {"version": None, "url": None}
+
+
+def _ver_tuple(v):
+    try:
+        return tuple(int(x) for x in v.lstrip("v").split("."))
+    except Exception:
+        return (0, 0, 0)
+
+
+def _check_for_update():
+    try:
+        req = URLRequest(
+            "https://api.github.com/repos/ethanstod/Audit-App-v2/releases/latest",
+            headers={"User-Agent": "WH347AuditEngine",
+                     "Accept": "application/vnd.github+json"}
+        )
+        data = json.loads(urlopen(req, timeout=8).read())
+        latest = data.get("tag_name", "").lstrip("v")
+        if latest and _ver_tuple(latest) > _ver_tuple(APP_VERSION):
+            for asset in data.get("assets", []):
+                if asset["name"].endswith(".exe") and "Setup" in asset["name"]:
+                    _update_info["version"] = latest
+                    _update_info["url"] = asset["browser_download_url"]
+                    break
+    except Exception:
+        pass
+
+
+threading.Thread(target=_check_for_update, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
@@ -386,6 +440,35 @@ def delete_audit(audit_id):
 
     conn.close()
     return redirect(url_for("index"))
+
+
+@app.context_processor
+def inject_update():
+    return {
+        "update_available": bool(_update_info.get("version")),
+        "update_version":   _update_info.get("version", ""),
+    }
+
+
+@app.route("/do-update", methods=["POST"])
+def do_update():
+    url = _update_info.get("url")
+    if not url:
+        return jsonify({"error": "no update available"}), 400
+
+    def _download_and_run():
+        try:
+            dest = os.path.join(tempfile.gettempdir(), "WH347-Audit-Engine-Setup.exe")
+            urlretrieve(url, dest)
+            subprocess.Popen([dest])
+            import time, os as _os
+            time.sleep(2)
+            _os._exit(0)
+        except Exception:
+            pass
+
+    threading.Thread(target=_download_and_run, daemon=False).start()
+    return jsonify({"status": "downloading"})
 
 
 # ---------------------------------------------------------------------------

@@ -2,8 +2,9 @@
 ; Build: ISCC installer.iss  (after PyInstaller produces dist\WH347 Audit Engine\)
 
 [Setup]
+AppId={{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}
 AppName=WH-347 Audit Engine
-AppVersion=1.0.1
+AppVersion=1.0.9
 AppPublisher=Stodola Construction
 AppPublisherURL=https://github.com/ethanstod/Audit-App-v2
 AppSupportURL=https://github.com/ethanstod/Audit-App-v2/issues
