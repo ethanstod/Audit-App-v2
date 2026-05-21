@@ -537,12 +537,16 @@
 </head>
 <body>
 
-{% if update_available %}
-<div class="update-banner">
-    <span>Update <strong>v{{ update_version }}</strong> is available</span>
+<div class="update-banner" id="update-banner" style="display:none;">
+    <span>Update <strong id="update-banner-version"></strong> is available</span>
     <button class="update-btn" id="update-btn" onclick="installUpdate()">Install Update</button>
 </div>
 <script>
+function _showUpdateBanner(version) {
+    document.getElementById('update-banner-version').textContent = 'v' + version;
+    document.getElementById('update-banner').style.display = 'flex';
+}
+
 function installUpdate() {
     var btn = document.getElementById('update-btn');
     btn.disabled = true;
@@ -552,8 +556,22 @@ function installUpdate() {
         .then(function() { btn.textContent = 'Installer launching — app will close shortly'; })
         .catch(function() { btn.disabled = false; btn.textContent = 'Install Update'; });
 }
+
+// Show immediately if server already knows about an update on page load
+{% if update_available %}_showUpdateBanner("{{ update_version }}");{% endif %}
+
+// Poll every 5 minutes so the banner appears live without a page reload
+setInterval(function() {
+    fetch('/update-status')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.available && document.getElementById('update-banner').style.display === 'none') {
+                _showUpdateBanner(data.version);
+            }
+        })
+        .catch(function() {});
+}, 5 * 60 * 1000);
 </script>
-{% endif %}
 
 <nav>
     <a class="nav-brand" href="/">

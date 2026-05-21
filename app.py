@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+import time
 import sqlite3
 import uuid
 import shutil
@@ -140,7 +141,12 @@ def _check_for_update():
         pass
 
 
-threading.Thread(target=_check_for_update, daemon=True).start()
+def _update_loop():
+    while True:
+        _check_for_update()
+        time.sleep(1800)  # re-check every 30 minutes
+
+threading.Thread(target=_update_loop, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
@@ -659,6 +665,14 @@ def delete_doc(doc_id):
         conn.commit()
     conn.close()
     return redirect(url_for("index"))
+
+
+@app.route("/update-status")
+def update_status():
+    return jsonify({
+        "available": bool(_update_info.get("version")),
+        "version":   _update_info.get("version", ""),
+    })
 
 
 @app.context_processor
