@@ -1,7 +1,9 @@
 import os
+import re
 import sys
 import sqlite3
 import uuid
+import shutil
 import threading
 import subprocess
 import tempfile
@@ -142,8 +144,15 @@ threading.Thread(target=_check_for_update, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
-# Database
+# Database helpers
 # ---------------------------------------------------------------------------
+
+def _safe_dirname(name):
+    """Convert a contractor name to a safe folder name."""
+    s = re.sub(r"[^\w\s\-']", "", name).strip()
+    s = re.sub(r"\s+", "_", s)
+    return s[:80] or "contractor"
+
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
@@ -194,11 +203,58 @@ def init_db():
             uploaded_at     TEXT
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS contractors (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT UNIQUE NOT NULL,
+            folder_name TEXT UNIQUE NOT NULL,
+            created_at  TEXT NOT NULL
+        )
+    """)
+    # Migrate: register contractors that exist only in contractor_docs
+    existing = conn.execute(
+        "SELECT DISTINCT contractor_name FROM contractor_docs"
+    ).fetchall()
+    for row in existing:
+        cname = row["contractor_name"]
+        base = _safe_dirname(cname)
+        fname = base
+        i = 1
+        while conn.execute("SELECT 1 FROM contractors WHERE folder_name = ?", (fname,)).fetchone():
+            fname = f"{base}_{i}"
+            i += 1
+        try:
+            conn.execute(
+                "INSERT INTO contractors (name, folder_name, created_at) VALUES (?, ?, ?)",
+                (cname, fname, datetime.now().strftime("%Y-%m-%d %H:%M"))
+            )
+            os.makedirs(os.path.join(DOCS_DIR, fname), exist_ok=True)
+        except sqlite3.IntegrityError:
+            pass
     conn.commit()
     conn.close()
 
 
 init_db()
+
+
+def _get_or_create_contractor(conn, name):
+    """Return the folder_name for a contractor, creating DB entry + folder if needed."""
+    row = conn.execute("SELECT folder_name FROM contractors WHERE name = ?", (name,)).fetchone()
+    if row:
+        return row["folder_name"]
+    base = _safe_dirname(name)
+    folder_name = base
+    i = 1
+    while conn.execute("SELECT 1 FROM contractors WHERE folder_name = ?", (folder_name,)).fetchone():
+        folder_name = f"{base}_{i}"
+        i += 1
+    os.makedirs(os.path.join(DOCS_DIR, folder_name), exist_ok=True)
+    conn.execute(
+        "INSERT INTO contractors (name, folder_name, created_at) VALUES (?, ?, ?)",
+        (name, folder_name, datetime.now().strftime("%Y-%m-%d %H:%M"))
+    )
+    return folder_name
 
 
 # ---------------------------------------------------------------------------
@@ -275,18 +331,28 @@ def index():
     total_fail = sum(1 for a in audits if a["overall_status"] == "FAIL")
     total_warn = sum(1 for a in audits if a["overall_status"] == "WARN")
 
-    # Contractor documents grouped by contractor name
+    # All registered contractors (alphabetical)
+    c_rows = conn.execute(
+        "SELECT name FROM contractors ORDER BY name COLLATE NOCASE"
+    ).fetchall()
+    contractor_names = [r["name"] for r in c_rows]
+
+    # Docs grouped by contractor
     docs = conn.execute(
         "SELECT * FROM contractor_docs ORDER BY contractor_name COLLATE NOCASE, doc_type, uploaded_at DESC"
     ).fetchall()
     conn.close()
 
     from collections import defaultdict
-    contractors = defaultdict(lambda: {"fringe_plan": [], "apprentice": [], "wage_deduction": []})
+    contractors = {name: {"fringe_plan": [], "apprentice": [], "wage_deduction": []}
+                   for name in contractor_names}
     for doc in docs:
-        contractors[doc["contractor_name"]][doc["doc_type"]].append(doc)
+        cname = doc["contractor_name"]
+        if cname not in contractors:
+            contractors[cname] = {"fringe_plan": [], "apprentice": [], "wage_deduction": []}
+        contractors[cname][doc["doc_type"]].append(doc)
     contractors = dict(sorted(contractors.items(), key=lambda x: x[0].lower()))
-    contractor_names = list(contractors.keys())
+    contractor_names = sorted(contractors.keys(), key=str.lower)
 
     return render_template("index.html",
                            total_pass=total_pass,
@@ -374,12 +440,14 @@ def upload():
         0.0, "", 0.0, "", "", "",
     ))
 
-    # Store supporting documents permanently under the contractor name
+    # Store supporting documents permanently under the contractor's subfolder
+    c_folder = _get_or_create_contractor(conn, contractor_name)
+
     def _store_doc(field_name, doc_type):
         f = request.files.get(field_name)
         if f and f.filename and f.filename.lower().endswith(".pdf"):
-            doc_id   = uuid.uuid4().hex[:10]
-            dest     = os.path.join(DOCS_DIR, f"{doc_id}_{f.filename}")
+            doc_id = uuid.uuid4().hex[:10]
+            dest   = os.path.join(DOCS_DIR, c_folder, f"{doc_id}_{f.filename}")
             f.save(dest)
             conn.execute("""
                 INSERT INTO contractor_docs (id, contractor_name, doc_type, original_name, file_path, uploaded_at)
@@ -454,15 +522,33 @@ def delete_audit(audit_id):
     return redirect(url_for("index"))
 
 
+@app.route("/contractors/create", methods=["POST"])
+def create_contractor():
+    data = request.get_json(silent=True) or {}
+    name = data.get("name", request.form.get("name", "")).strip()
+    if not name or name == "__new__":
+        return jsonify({"error": "A valid contractor name is required."}), 400
+    conn = get_db()
+    try:
+        _get_or_create_contractor(conn, name)
+        conn.commit()
+    except Exception as e:
+        conn.close()
+        return jsonify({"error": str(e)}), 500
+    conn.close()
+    return jsonify({"ok": True, "name": name})
+
+
 @app.route("/docs/upload", methods=["POST"])
 def upload_docs():
     """Standalone supporting-document upload — no WH-347 required."""
     contractor_name = request.form.get("contractor_name", "").strip()
-    if not contractor_name:
-        flash("Contractor name is required.", "error")
+    if not contractor_name or contractor_name == "__new__":
+        flash("Please select a contractor.", "error")
         return redirect(url_for("index"))
 
     conn = get_db()
+    folder_name = _get_or_create_contractor(conn, contractor_name)
     uploaded = 0
 
     def _store(field, doc_type):
@@ -470,7 +556,7 @@ def upload_docs():
         f = request.files.get(field)
         if f and f.filename and f.filename.lower().endswith(".pdf"):
             doc_id = uuid.uuid4().hex[:10]
-            dest   = os.path.join(DOCS_DIR, f"{doc_id}_{f.filename}")
+            dest   = os.path.join(DOCS_DIR, folder_name, f"{doc_id}_{f.filename}")
             f.save(dest)
             conn.execute("""
                 INSERT INTO contractor_docs
@@ -519,6 +605,9 @@ def delete_contractor():
         return redirect(url_for("index"))
 
     conn = get_db()
+    c_row = conn.execute("SELECT folder_name FROM contractors WHERE name = ?", (name,)).fetchone()
+
+    # Delete individual doc files (handles legacy flat-path files too)
     docs = conn.execute(
         "SELECT file_path FROM contractor_docs WHERE contractor_name = ?", (name,)
     ).fetchall()
@@ -528,7 +617,18 @@ def delete_contractor():
                 os.remove(doc["file_path"])
             except Exception:
                 pass
+
+    # Delete the contractor's subfolder (removes any remaining files)
+    if c_row:
+        folder = os.path.join(DOCS_DIR, c_row["folder_name"])
+        if os.path.exists(folder):
+            try:
+                shutil.rmtree(folder)
+            except Exception:
+                pass
+
     conn.execute("DELETE FROM contractor_docs WHERE contractor_name = ?", (name,))
+    conn.execute("DELETE FROM contractors WHERE name = ?", (name,))
     conn.commit()
     conn.close()
     flash(f"Deleted all documents for \"{name}\".", "info")

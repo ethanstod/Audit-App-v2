@@ -42,13 +42,27 @@
         </div>
     </div>
 
-    <form method="POST" action="/docs/upload" enctype="multipart/form-data">
+    <form method="POST" action="/docs/upload" enctype="multipart/form-data" id="sd-form">
         <div class="form-group full" style="margin-bottom:14px;">
-            <label>Contractor Name <span style="color:var(--red);">*</span></label>
-            <input type="text" name="contractor_name" list="contractor-list"
-                   placeholder="Type or select existing contractor" required
-                   style="max-width:420px;">
-            <span class="form-hint">Existing contractors appear as suggestions — select one to add docs to them.</span>
+            <label>Contractor <span style="color:var(--red);">*</span></label>
+            <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+                <select name="contractor_name" id="sd-contractor-select" style="max-width:340px;padding:9px 12px;border:1px solid var(--border);border-radius:6px;font-size:13px;color:var(--text);background:white;">
+                    <option value="">— Select a contractor —</option>
+                    <option value="__new__">+ Create New Contractor</option>
+                    {% for name in contractor_names %}
+                    <option value="{{ name }}">{{ name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div id="sd-create-panel" style="display:none;margin-top:10px;">
+                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                    <input type="text" id="sd-new-name" placeholder="New contractor name"
+                           style="max-width:300px;padding:8px 12px;border:1px solid var(--border);border-radius:6px;font-size:13px;">
+                    <button type="button" class="btn btn-primary btn-sm" onclick="sdCreateContractor()">Create</button>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="sdCancelCreate()">Cancel</button>
+                </div>
+                <div id="sd-create-msg" style="font-size:12px;margin-top:6px;color:var(--red);"></div>
+            </div>
         </div>
 
         <div class="mini-supp-row" style="margin-bottom:16px;">
@@ -294,6 +308,70 @@
     setupMiniBox('supp-zone-fringe',     'fringe-plan-input', 'supp-name-fringe');
     setupMiniBox('supp-zone-apprentice', 'apprentice-input',  'supp-name-apprentice');
     setupMiniBox('supp-zone-deduction',  'deduction-input',   'supp-name-deduction');
+
+    /* ---- Standalone upload: contractor dropdown + create ---- */
+    const sdSelect      = document.getElementById('sd-contractor-select');
+    const sdCreatePanel = document.getElementById('sd-create-panel');
+    const sdForm        = document.getElementById('sd-form');
+
+    sdSelect.addEventListener('change', function () {
+        sdCreatePanel.style.display = this.value === '__new__' ? 'block' : 'none';
+    });
+
+    sdForm.addEventListener('submit', function (e) {
+        const v = sdSelect.value;
+        if (!v || v === '__new__') {
+            e.preventDefault();
+            alert('Please select or create a contractor first.');
+        }
+    });
+
+    function sdCreateContractor() {
+        const name = document.getElementById('sd-new-name').value.trim();
+        const msg  = document.getElementById('sd-create-msg');
+        if (!name) { msg.textContent = 'Enter a contractor name.'; return; }
+        msg.textContent = 'Creating...';
+        msg.style.color = 'var(--muted)';
+
+        fetch('/contractors/create', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: name })
+        })
+        .then(r => r.json())
+        .then(data => {
+            if (data.error) {
+                msg.textContent = data.error;
+                msg.style.color = 'var(--red)';
+                return;
+            }
+            // Add to dropdown and select it
+            const opt = new Option(name, name);
+            sdSelect.add(opt);
+            sdSelect.value = name;
+            sdCreatePanel.style.display = 'none';
+            msg.textContent = '';
+            document.getElementById('sd-new-name').value = '';
+            // Also add to WH-347 datalist
+            const dl = document.getElementById('contractor-list');
+            if (dl) {
+                const o = document.createElement('option');
+                o.value = name;
+                dl.appendChild(o);
+            }
+        })
+        .catch(() => {
+            msg.textContent = 'Request failed. Try again.';
+            msg.style.color = 'var(--red)';
+        });
+    }
+
+    function sdCancelCreate() {
+        sdSelect.value = '';
+        sdCreatePanel.style.display = 'none';
+        document.getElementById('sd-new-name').value = '';
+        document.getElementById('sd-create-msg').textContent = '';
+    }
 
     /* ---- Contractor rename toggle ---- */
     function toggleRename(cid) {
