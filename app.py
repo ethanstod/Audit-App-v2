@@ -10,6 +10,8 @@ from datetime import datetime
 from urllib.request import urlopen, urlretrieve, Request as URLRequest
 from urllib.error import URLError
 
+import sentry_sdk
+from sentry_sdk.integrations.flask import FlaskIntegration
 import pandas as pd
 from flask import (Flask, render_template, request, redirect,
                    url_for, send_file, jsonify, flash)
@@ -58,6 +60,15 @@ WAGE_TABLE = _rates_beside if os.path.exists(_rates_beside) else _rates_bundle
 
 app = Flask(__name__, template_folder=os.path.join(_RESOURCE_DIR, "templates"))
 app.secret_key = os.environ.get("SECRET_KEY", "wh347-audit-dev-key")
+
+_version_file = os.path.join(_RESOURCE_DIR, "version.txt")
+_sentry_release = open(_version_file).read().strip() if os.path.exists(_version_file) else "dev"
+sentry_sdk.init(
+    dsn="https://e780b7a2888adebf9acf0c572c81d275@o4511429828739072.ingest.us.sentry.io/4511429834440704",
+    integrations=[FlaskIntegration()],
+    release=_sentry_release,
+    traces_sample_rate=0.0,
+)
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(REPORT_DIR, exist_ok=True)

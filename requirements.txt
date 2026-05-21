@@ -6,3 +6,4 @@ pdfminer.six>=20221105
 waitress>=3.0
 pywebview>=4.4
 pillow>=10.0
+sentry-sdk[flask]>=2.0
