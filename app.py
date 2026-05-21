@@ -144,7 +144,7 @@ def _check_for_update():
 def _update_loop():
     while True:
         _check_for_update()
-        time.sleep(1800)  # re-check every 30 minutes
+        time.sleep(300)  # re-check every 5 minutes
 
 threading.Thread(target=_update_loop, daemon=True).start()
 
