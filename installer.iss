@@ -18,6 +18,8 @@ SolidCompression=yes
 WizardStyle=modern
 ; Run without admin if user has no admin rights
 PrivilegesRequiredOverridesAllowed=dialog
+; Close the running app automatically before installing
+CloseApplications=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -34,4 +36,7 @@ Name: "{group}\Uninstall WH-347 Audit Engine"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\WH-347 Audit Engine"; Filename: "{app}\WH347 Audit Engine.exe"; Tasks: desktopicon
 
 [Run]
+; Normal install: show "Launch after install" checkbox
 Filename: "{app}\WH347 Audit Engine.exe"; Description: "{cm:LaunchProgram,WH-347 Audit Engine}"; Flags: nowait postinstall skipifsilent
+; Silent install (auto-update): relaunch automatically with no prompt
+Filename: "{app}\WH347 Audit Engine.exe"; Flags: nowait skipifnotsilent

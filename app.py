@@ -693,7 +693,7 @@ def do_update():
         try:
             dest = os.path.join(tempfile.gettempdir(), "WH347-Audit-Engine-Setup.exe")
             urlretrieve(url, dest)
-            subprocess.Popen([dest])
+            subprocess.Popen([dest, "/VERYSILENT", "/NORESTART"])
             import time, os as _os
             time.sleep(2)
             _os._exit(0)
