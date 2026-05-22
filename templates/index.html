@@ -119,6 +119,74 @@
     </form>
 </div>
 
+<!-- ③ Audit History -->
+<div class="card">
+    <div class="section-header">
+        <div>
+            <div class="section-title">Audit History</div>
+            <div class="section-subtitle">Click any row to open the full report</div>
+        </div>
+    </div>
+
+    {% if recent_audits %}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Status</th>
+                    <th>Contractor</th>
+                    <th>Week Ending</th>
+                    <th>Payroll #</th>
+                    <th>Workers</th>
+                    <th>Findings</th>
+                    <th>Submitted</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for a in recent_audits %}
+                <tr style="cursor:pointer;" onclick="window.location='/report/{{ a.id }}'">
+                    <td>
+                        {% if a.overall_status == 'PASS' %}<span class="badge badge-pass">PASS</span>
+                        {% elif a.overall_status == 'WARN' %}<span class="badge badge-warn">WARN</span>
+                        {% else %}<span class="badge badge-fail">FAIL</span>{% endif %}
+                    </td>
+                    <td style="font-weight:500;">{{ a.contractor_name }}</td>
+                    <td>{{ a.week_ending or '—' }}</td>
+                    <td style="font-family:monospace;font-size:12px;">{{ a.payroll_number or '—' }}</td>
+                    <td>{{ a.worker_count }}</td>
+                    <td>
+                        {% if a.violation_count > 0 %}
+                            <span style="color:var(--red);font-weight:600;">{{ a.violation_count }}F</span>
+                        {% endif %}
+                        {% if a.warning_count > 0 %}
+                            <span style="color:var(--yellow);font-weight:600;{% if a.violation_count > 0 %}margin-left:6px;{% endif %}">{{ a.warning_count }}W</span>
+                        {% endif %}
+                        {% if a.violation_count == 0 and a.warning_count == 0 %}
+                            <span style="color:var(--green);">—</span>
+                        {% endif %}
+                    </td>
+                    <td style="font-size:12px;color:var(--muted);white-space:nowrap;">{{ a.submitted_at }}</td>
+                    <td onclick="event.stopPropagation()">
+                        <form method="POST" action="/delete/{{ a.id }}" style="display:inline;"
+                              onsubmit="return confirm('Delete this audit record?')">
+                            <button type="submit" class="btn btn-danger btn-sm">Delete</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="empty-state">
+        <div style="font-size:40px;margin-bottom:12px;">&#128202;</div>
+        <strong>No audits yet</strong>
+        <p>Upload a WH-347 PDF above to run your first audit.</p>
+    </div>
+    {% endif %}
+</div>
+
 {% endblock %}
 
 {% block scripts %}

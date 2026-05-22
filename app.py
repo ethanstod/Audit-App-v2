@@ -331,11 +331,14 @@ def count_findings(report_data):
 def index():
     conn = get_db()
 
-    # Audit status counts (for stat cards — no history table)
+    # Audit status counts + recent history
     audits = conn.execute("SELECT overall_status FROM audits").fetchall()
     total_pass = sum(1 for a in audits if a["overall_status"] == "PASS")
     total_fail = sum(1 for a in audits if a["overall_status"] == "FAIL")
     total_warn = sum(1 for a in audits if a["overall_status"] == "WARN")
+    recent_audits = conn.execute(
+        "SELECT * FROM audits ORDER BY submitted_at DESC LIMIT 50"
+    ).fetchall()
 
     # All registered contractors (alphabetical)
     c_rows = conn.execute(
@@ -364,6 +367,7 @@ def index():
                            total_pass=total_pass,
                            total_fail=total_fail,
                            total_warn=total_warn,
+                           recent_audits=recent_audits,
                            wage_det=WAGE_DET_INFO,
                            contractors=contractors,
                            contractor_names=contractor_names)
@@ -416,6 +420,16 @@ def upload():
 
     # Wire contractor's existing supporting docs into the report before generating HTML
     conn = get_db()
+
+    # Fuzzy-match PDF name against registered contractors to handle slight variations
+    # (e.g. "Smith Construction LLC" → "Smith Construction" if that's registered)
+    if contractor_name != "Unknown":
+        from difflib import get_close_matches
+        all_names = [r["name"] for r in conn.execute("SELECT name FROM contractors").fetchall()]
+        matches = get_close_matches(contractor_name, all_names, n=1, cutoff=0.75)
+        if matches:
+            contractor_name = matches[0]
+
     _get_or_create_contractor(conn, contractor_name)
     existing_docs = conn.execute(
         "SELECT doc_type, original_name FROM contractor_docs "
