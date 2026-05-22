@@ -342,8 +342,8 @@ def _section_apprentice_ratios(apprentice_results):
 
 
 def _section_supporting_docs(supp_docs):
-    if not supp_docs:
-        return ""
+    if supp_docs is None:
+        supp_docs = {}
 
     items = [
         ("Fringe Benefit Plan",

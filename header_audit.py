@@ -60,7 +60,6 @@ def audit_header(parsed_data):
             if present and not valid:
                 status = "WARN"
                 reason = f"'{value}' does not appear to be a valid date"
-                results["passed"] = False
             elif not present:
                 status = "FAIL"
                 reason = "Field missing or not extracted from PDF"

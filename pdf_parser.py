@@ -193,9 +193,9 @@ _WORKER_COL_RANGES = {
     'worker_id':        (193,  228),
     'j_ra':             (228,  260),
     'classification':   (260,  341),
-    'ot_hours_sub':     (395,  435),  # OT sub-row hours
-    'dt_hours_sub':     (450,  480),  # DT sub-row hours (if present)
-    'total_hours':      (430,  450),  # total hours (non-overlapping with dt_hours_sub)
+    'ot_hours_sub':     (395,  430),  # OT sub-row hours (stops before total_hours)
+    'total_hours':      (430,  450),  # total hours
+    'dt_hours_sub':     (450,  462),  # DT sub-row hours (stops before st_rate)
     'st_rate':          (462,  503),
     'fringe_credit':    (503,  535),
     'gross':            (597,  637),
@@ -205,7 +205,7 @@ _WORKER_COL_RANGES = {
     'net':              (727,  800),
 }
 
-_TOTAL_HOURS_RANGE = (430, 450)
+_TOTAL_HOURS_RANGE = (430, 450)  # must match 'total_hours' entry above
 
 
 def _x_to_col(x0):

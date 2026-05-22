@@ -41,6 +41,9 @@ a = Analysis(
         "sqlite3", "_sqlite3",
         "openpyxl", "openpyxl.styles", "openpyxl.utils", "openpyxl.reader",
         "charset_normalizer",
+        # Sentry error reporting
+        "sentry_sdk", "sentry_sdk.integrations", "sentry_sdk.integrations.flask",
+        "sentry_sdk.integrations.logging", "sentry_sdk.integrations.excepthook",
     ] + pdfminer_h + pdfplumber_h + webview_h + pandas_h + openpyxl_h,
     hookspath=[],
     hooksconfig={},

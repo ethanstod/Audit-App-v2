@@ -565,6 +565,10 @@ def create_contractor():
 @app.route("/docs/upload", methods=["POST"])
 def upload_docs():
     """Standalone supporting-document upload — no WH-347 required."""
+    if request.content_length and request.content_length > 50 * 1024 * 1024:
+        flash("File too large. Maximum upload size is 50 MB.", "error")
+        return redirect(url_for("index"))
+
     contractor_name = request.form.get("contractor_name", "").strip()
     if not contractor_name or contractor_name == "__new__":
         flash("Please select a contractor.", "error")
@@ -611,10 +615,59 @@ def rename_contractor():
         return redirect(url_for("index"))
 
     conn = get_db()
+    c_row = conn.execute(
+        "SELECT folder_name FROM contractors WHERE name = ?", (old_name,)
+    ).fetchone()
+
     conn.execute("UPDATE contractor_docs SET contractor_name = ? WHERE contractor_name = ?",
                  (new_name, old_name))
     conn.execute("UPDATE audits SET contractor_name = ? WHERE contractor_name = ?",
                  (new_name, old_name))
+
+    if c_row:
+        old_folder = c_row["folder_name"]
+        new_base = _safe_dirname(new_name)
+        new_folder = new_base
+        i = 1
+        while conn.execute(
+            "SELECT 1 FROM contractors WHERE folder_name = ? AND name != ?",
+            (new_folder, old_name)
+        ).fetchone():
+            new_folder = f"{new_base}_{i}"
+            i += 1
+
+        old_path = os.path.join(DOCS_DIR, old_folder)
+        new_path = os.path.join(DOCS_DIR, new_folder)
+        if os.path.exists(old_path) and old_folder != new_folder:
+            try:
+                os.rename(old_path, new_path)
+            except Exception:
+                new_folder = old_folder  # keep old folder if rename fails
+
+        conn.execute(
+            "UPDATE contractors SET name = ?, folder_name = ? WHERE name = ?",
+            (new_name, new_folder, old_name)
+        )
+        # Update file paths in contractor_docs that referenced the old folder
+        if old_folder != new_folder:
+            docs = conn.execute(
+                "SELECT id, file_path FROM contractor_docs WHERE contractor_name = ?",
+                (new_name,)
+            ).fetchall()
+            for doc in docs:
+                if doc["file_path"] and old_folder in doc["file_path"]:
+                    updated = doc["file_path"].replace(
+                        os.path.join(DOCS_DIR, old_folder),
+                        os.path.join(DOCS_DIR, new_folder)
+                    )
+                    conn.execute(
+                        "UPDATE contractor_docs SET file_path = ? WHERE id = ?",
+                        (updated, doc["id"])
+                    )
+    else:
+        # No contractors entry yet — create one under the new name
+        _get_or_create_contractor(conn, new_name)
+
     conn.commit()
     conn.close()
     flash(f"Renamed \"{old_name}\" to \"{new_name}\".", "success")
