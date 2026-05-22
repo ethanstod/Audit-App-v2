@@ -200,6 +200,12 @@ def init_db():
             conn.execute(f"ALTER TABLE audits ADD COLUMN {col} TEXT DEFAULT ''")
         except Exception:
             pass
+    # Migrate: add per-worker deduction fields to contractor_docs
+    for col_def in ("worker_name TEXT DEFAULT ''", "authorized_amount REAL DEFAULT 0.0"):
+        try:
+            conn.execute(f"ALTER TABLE contractor_docs ADD COLUMN {col_def}")
+        except Exception:
+            pass
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS contractor_docs (
@@ -269,9 +275,12 @@ def _get_or_create_contractor(conn, name):
 # Audit runner
 # ---------------------------------------------------------------------------
 
-def run_full_audit(pdf_path):
-    """Run all audit modules against a WH-347 PDF. Returns report_data dict."""
-    parsed_data = extract_wh347_data(pdf_path)
+def run_full_audit(pdf_path_or_data, authorized_deductions=None):
+    """Run all audit modules. Accepts a PDF path or a pre-parsed data dict."""
+    if isinstance(pdf_path_or_data, dict):
+        parsed_data = pdf_path_or_data
+    else:
+        parsed_data = extract_wh347_data(pdf_path_or_data)
 
     wage_table         = load_wage_table(WAGE_TABLE)
     header_results     = audit_header(parsed_data)
@@ -280,7 +289,7 @@ def run_full_audit(pdf_path):
     pay_results        = audit_all_workers(parsed_data, wage_table)
     fringe_results     = audit_fringe_benefits(parsed_data, wage_table)
     apprentice_results = audit_apprentice_rates(parsed_data, wage_table)
-    deduction_results  = audit_deductions(parsed_data)
+    deduction_results  = audit_deductions(parsed_data, authorized_deductions or {})
     class_results      = audit_classifications(parsed_data, wage_table)
 
     overall_pass = all([
@@ -392,38 +401,57 @@ def upload():
         flash("File too large. Maximum upload size is 50 MB.", "error")
         return redirect(url_for("index"))
 
-    # Save WH-347 PDF
     audit_id     = uuid.uuid4().hex[:10]
     pdf_filename = file.filename
     pdf_path     = os.path.join(UPLOAD_DIR, f"{audit_id}.pdf")
     report_path  = os.path.join(REPORT_DIR, f"{audit_id}.html")
     file.save(pdf_path)
 
+    # Step 1: Parse PDF first so we can look up contractor-specific docs before auditing
     try:
-        report_data = run_full_audit(pdf_path)
-        for w in report_data.get("parse_warnings", []):
-            flash(f"Parser warning: {w}", "warning")
+        parsed_data = extract_wh347_data(pdf_path)
     except Exception as e:
         os.remove(pdf_path)
         flash(f"Audit failed: {e}", "error")
         return redirect(url_for("index"))
 
-    header = report_data["parsed_data"].get("header", {})
-    totals = report_data["parsed_data"].get("totals", {})
-    v_count, w_count = count_findings(report_data)
+    for w in parsed_data.get("parse_warnings", []):
+        flash(f"Parser warning: {w}", "warning")
+
+    header = parsed_data.get("header", {})
+    totals = parsed_data.get("totals", {})
     contractor_name = header.get("contractor_name", "").strip() or "Unknown"
 
-    # Wire contractor's existing supporting docs into the report before generating HTML
     conn = get_db()
 
-    # Fuzzy-match PDF name against registered contractors to handle slight variations
-    # (e.g. "Smith Construction LLC" → "Smith Construction" if that's registered)
+    # Step 2: Fuzzy-match PDF contractor name against registered contractors
     if contractor_name != "Unknown":
         all_names = [r["name"] for r in conn.execute("SELECT name FROM contractors").fetchall()]
         matches = get_close_matches(contractor_name, all_names, n=1, cutoff=0.75)
         if matches:
             contractor_name = matches[0]
 
+    # Step 3: Build per-worker authorized-deduction lookup so the audit can cross-reference
+    deduction_docs = conn.execute(
+        "SELECT worker_name, authorized_amount FROM contractor_docs "
+        "WHERE contractor_name = ? AND doc_type = 'wage_deduction' "
+        "AND worker_name != '' AND authorized_amount > 0",
+        (contractor_name,)
+    ).fetchall()
+    authorized_deductions = {d["worker_name"]: d["authorized_amount"] for d in deduction_docs}
+
+    # Step 4: Run full audit with pre-parsed data and authorized deductions
+    try:
+        report_data = run_full_audit(parsed_data, authorized_deductions=authorized_deductions)
+    except Exception as e:
+        conn.close()
+        os.remove(pdf_path)
+        flash(f"Audit failed: {e}", "error")
+        return redirect(url_for("index"))
+
+    v_count, w_count = count_findings(report_data)
+
+    # Step 5: Wire contractor's supporting docs into the report
     _get_or_create_contractor(conn, contractor_name)
     existing_docs = conn.execute(
         "SELECT doc_type, original_name FROM contractor_docs "
@@ -578,7 +606,7 @@ def upload_docs():
     folder_name = _get_or_create_contractor(conn, contractor_name)
     uploaded = 0
 
-    def _store(field, doc_type):
+    def _store(field, doc_type, worker_name='', authorized_amount=0.0):
         nonlocal uploaded
         f = request.files.get(field)
         if f and f.filename and f.filename.lower().endswith(".pdf"):
@@ -587,15 +615,24 @@ def upload_docs():
             f.save(dest)
             conn.execute("""
                 INSERT INTO contractor_docs
-                    (id, contractor_name, doc_type, original_name, file_path, uploaded_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (id, contractor_name, doc_type, original_name, file_path, uploaded_at,
+                     worker_name, authorized_amount)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (doc_id, contractor_name, doc_type, f.filename, dest,
-                  datetime.now().strftime("%Y-%m-%d %H:%M")))
+                  datetime.now().strftime("%Y-%m-%d %H:%M"), worker_name, authorized_amount))
             uploaded += 1
 
-    _store("fringe_plan_pdf",    "fringe_plan")
-    _store("apprentice_pdf",     "apprentice")
-    _store("wage_deduction_pdf", "wage_deduction")
+    _store("fringe_plan_pdf", "fringe_plan")
+    _store("apprentice_pdf",  "apprentice")
+
+    _wd_name = request.form.get("worker_name_deduction", "").strip()
+    _wd_amt  = 0.0
+    try:
+        _wd_amt = float(request.form.get("authorized_amount_deduction") or 0)
+    except (ValueError, TypeError):
+        pass
+    _store("wage_deduction_pdf", "wage_deduction",
+           worker_name=_wd_name, authorized_amount=_wd_amt)
 
     conn.commit()
     conn.close()

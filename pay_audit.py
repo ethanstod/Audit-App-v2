@@ -401,7 +401,7 @@ def audit_apprentice_rates(parsed_data, wage_table):
 # Deduction / Copeland Act audit
 # ---------------------------------------------------------------------------
 
-def audit_deductions(parsed_data):
+def audit_deductions(parsed_data, authorized_deductions=None):
     """
     Checks deduction amounts for compliance with Copeland Anti-Kickback Act.
 
@@ -409,9 +409,15 @@ def audit_deductions(parsed_data):
     - Net pay >= $0 (hard violation)
     - Net pay >= EO minimum wage × total hours (minimum wage floor)
     - Deductions <= 85% of gross (excessive deductions flag)
+    - If an authorized deduction doc is on file for this worker, reported
+      deductions must match the authorized amount within tolerance
+
+    authorized_deductions: {worker_name: authorized_amount} — keyed by the
+    name entered when the wage deduction doc was uploaded.
 
     Regulation: Copeland Anti-Kickback Act; 29 CFR 3.1; 29 CFR 3.5; EO 14026
     """
+    authorized_deductions = authorized_deductions or {}
 
     workers = parsed_data.get("lines", [])
     results = {
@@ -456,6 +462,40 @@ def audit_deductions(parsed_data):
                 "regulation": "29 CFR 3.5",
                 "severity": "WARNING",
             })
+
+        # Check 4: Cross-reference authorization document
+        # If a wage deduction doc was uploaded for this worker, the reported
+        # deduction amount must match the authorized amount on file.
+        if authorized_deductions and deductions > 0:
+            full_name = (
+                f"{worker.get('first_name', '')} {worker.get('last_name', '')}".strip().upper()
+            )
+            last_name = worker.get('last_name', '').strip().upper()
+
+            auth_amount = None
+            matched_key = None
+            for name_key, amt in authorized_deductions.items():
+                nk = name_key.upper()
+                if nk == full_name or nk == last_name or nk in full_name or last_name in nk:
+                    auth_amount = amt
+                    matched_key = name_key
+                    break
+                if get_close_matches(nk, [full_name, last_name], n=1, cutoff=0.75):
+                    auth_amount = amt
+                    matched_key = name_key
+                    break
+
+            if auth_amount is not None:
+                if abs(deductions - auth_amount) > TOLERANCE:
+                    issues.append({
+                        "text": (
+                            f"Deduction ${deductions:.2f} does not match authorized amount "
+                            f"${auth_amount:.2f} from document on file for '{matched_key}' "
+                            f"— possible unauthorized deduction"
+                        ),
+                        "regulation": "Copeland Anti-Kickback Act; 29 CFR 3.5",
+                        "severity": "VIOLATION",
+                    })
 
         violations = [i for i in issues if i["severity"] == "VIOLATION"]
         warnings = [i for i in issues if i["severity"] == "WARNING"]

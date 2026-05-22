@@ -85,6 +85,32 @@
         <input type="file" id="sd-apprentice-input" name="apprentice_pdf"    accept=".pdf" style="display:none">
         <input type="file" id="sd-deduction-input"  name="wage_deduction_pdf" accept=".pdf" style="display:none">
 
+        <!-- Revealed after a deduction PDF is selected -->
+        <div id="sd-deduction-meta" style="display:none;margin-bottom:14px;padding:14px 16px;background:#f8fafc;border:1px solid var(--border);border-radius:8px;">
+            <div class="stat-label" style="margin-bottom:10px;">Deduction Details</div>
+            <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;">
+                <div class="form-group">
+                    <label>Worker Name</label>
+                    <input type="text" name="worker_name_deduction" id="sd-worker-name"
+                           placeholder="e.g. Anthony Smith"
+                           style="min-width:210px;padding:8px 12px;border:1px solid var(--border);border-radius:6px;font-size:13px;color:var(--text);">
+                </div>
+                <div class="form-group">
+                    <label>Authorized Amount / Week</label>
+                    <div style="display:flex;align-items:center;gap:5px;">
+                        <span style="font-size:14px;color:var(--muted);font-weight:600;">$</span>
+                        <input type="number" name="authorized_amount_deduction" id="sd-auth-amount"
+                               placeholder="0.00" step="0.01" min="0"
+                               style="width:120px;padding:8px 12px;border:1px solid var(--border);border-radius:6px;font-size:13px;color:var(--text);">
+                    </div>
+                </div>
+            </div>
+            <div style="font-size:11px;color:var(--muted);margin-top:8px;">
+                Enter the name exactly as it appears on their WH-347 row and the court-ordered or authorized weekly deduction amount.
+                The audit will verify reported deductions match this amount.
+            </div>
+        </div>
+
         <button type="submit" class="btn btn-primary">Save Documents</button>
     </form>
 </div>
@@ -219,7 +245,7 @@
     });
 
     /* ---- Generic mini drop zone setup ---- */
-    function setupMiniBox(zoneId, inputId, nameId) {
+    function setupMiniBox(zoneId, inputId, nameId, onFilePicked) {
         const zone  = document.getElementById(zoneId);
         const input = document.getElementById(inputId);
         const name  = document.getElementById(nameId);
@@ -231,6 +257,7 @@
             input.files = dt.files;
             name.textContent = file.name;
             zone.classList.add('has-file');
+            if (onFilePicked) onFilePicked(file);
         }
         input.addEventListener('change', () => { if (input.files[0]) setFile(input.files[0]); });
         zone.addEventListener('dragover',  e => { e.preventDefault(); zone.classList.add('dragover'); });
@@ -241,7 +268,10 @@
     /* Standalone doc upload boxes */
     setupMiniBox('sd-zone-fringe',     'sd-fringe-input',    'sd-name-fringe');
     setupMiniBox('sd-zone-apprentice', 'sd-apprentice-input','sd-name-apprentice');
-    setupMiniBox('sd-zone-deduction',  'sd-deduction-input', 'sd-name-deduction');
+    setupMiniBox('sd-zone-deduction',  'sd-deduction-input', 'sd-name-deduction', function() {
+        document.getElementById('sd-deduction-meta').style.display = 'block';
+        document.getElementById('sd-worker-name').focus();
+    });
 
     /* ---- Standalone upload: contractor dropdown + create ---- */
     const sdSelect      = document.getElementById('sd-contractor-select');
