@@ -393,8 +393,6 @@ def upload():
         flash("Only PDF files are accepted.", "error")
         return redirect(url_for("index"))
 
-    contractor_name_hint = request.form.get("contractor_name", "").strip()
-
     # Save WH-347 PDF
     audit_id     = uuid.uuid4().hex[:10]
     pdf_filename = file.filename
@@ -406,7 +404,6 @@ def upload():
         report_data = run_full_audit(pdf_path)
         for w in report_data.get("parse_warnings", []):
             flash(f"Parser warning: {w}", "warning")
-        generate_wh347_html_report(report_data, report_path)
     except Exception as e:
         os.remove(pdf_path)
         flash(f"Audit failed: {e}", "error")
@@ -415,11 +412,28 @@ def upload():
     header = report_data["parsed_data"].get("header", {})
     totals = report_data["parsed_data"].get("totals", {})
     v_count, w_count = count_findings(report_data)
+    contractor_name = header.get("contractor_name", "").strip() or "Unknown"
 
-    # Contractor name: prefer parsed header, fall back to form hint
-    contractor_name = header.get("contractor_name", "").strip() or contractor_name_hint or "Unknown"
-
+    # Wire contractor's existing supporting docs into the report before generating HTML
     conn = get_db()
+    _get_or_create_contractor(conn, contractor_name)
+    existing_docs = conn.execute(
+        "SELECT doc_type, original_name FROM contractor_docs "
+        "WHERE contractor_name = ? ORDER BY uploaded_at DESC",
+        (contractor_name,)
+    ).fetchall()
+    supp_docs = {}
+    _key_map = {"fringe_plan": "fringe_plan_doc",
+                "apprentice":  "apprentice_doc",
+                "wage_deduction": "wage_deduction_doc"}
+    for doc in existing_docs:
+        k = _key_map.get(doc["doc_type"])
+        if k and k not in supp_docs:
+            supp_docs[k] = doc["original_name"]
+    report_data["supp_docs"] = supp_docs
+
+    generate_wh347_html_report(report_data, report_path)
+
     conn.execute("""
         INSERT INTO audits (
             id, contractor_name, contract_number, week_ending, payroll_number,
@@ -443,28 +457,11 @@ def upload():
         totals.get("workers", 0),
         v_count,
         w_count,
-        0.0, "", 0.0, "", "", "",
+        0.0, "", 0.0,
+        supp_docs.get("fringe_plan_doc", ""),
+        supp_docs.get("apprentice_doc", ""),
+        supp_docs.get("wage_deduction_doc", ""),
     ))
-
-    # Store supporting documents permanently under the contractor's subfolder
-    c_folder = _get_or_create_contractor(conn, contractor_name)
-
-    def _store_doc(field_name, doc_type):
-        f = request.files.get(field_name)
-        if f and f.filename and f.filename.lower().endswith(".pdf"):
-            doc_id = uuid.uuid4().hex[:10]
-            dest   = os.path.join(DOCS_DIR, c_folder, f"{doc_id}_{f.filename}")
-            f.save(dest)
-            conn.execute("""
-                INSERT INTO contractor_docs (id, contractor_name, doc_type, original_name, file_path, uploaded_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (doc_id, contractor_name, doc_type, f.filename, dest,
-                  datetime.now().strftime("%Y-%m-%d %H:%M")))
-
-    _store_doc("fringe_plan_pdf",    "fringe_plan")
-    _store_doc("apprentice_pdf",     "apprentice")
-    _store_doc("wage_deduction_pdf", "wage_deduction")
-
     conn.commit()
     conn.close()
 
@@ -477,13 +474,28 @@ def view_report(audit_id):
     audit = conn.execute(
         "SELECT * FROM audits WHERE id = ?", (audit_id,)
     ).fetchone()
+
+    contractor_docs = []
+    if audit and audit["contractor_name"]:
+        contractor_docs = conn.execute(
+            "SELECT * FROM contractor_docs WHERE contractor_name = ? "
+            "ORDER BY doc_type, uploaded_at DESC",
+            (audit["contractor_name"],)
+        ).fetchall()
     conn.close()
 
     if not audit:
         flash("Audit not found.", "error")
         return redirect(url_for("index"))
 
-    return render_template("report.html", audit=audit, audit_id=audit_id)
+    # Group docs by type for display
+    from collections import defaultdict
+    docs_by_type = defaultdict(list)
+    for doc in contractor_docs:
+        docs_by_type[doc["doc_type"]].append(doc)
+
+    return render_template("report.html", audit=audit, audit_id=audit_id,
+                           docs_by_type=dict(docs_by_type))
 
 
 @app.route("/report/<audit_id>/raw")
