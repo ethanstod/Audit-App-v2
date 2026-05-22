@@ -26,13 +26,6 @@
     {% endif %}
 </div>
 
-<!-- Contractor name datalist (shared by both forms) -->
-<datalist id="contractor-list">
-    {% for name in contractor_names %}
-    <option value="{{ name }}">
-    {% endfor %}
-</datalist>
-
 <!-- ① Standalone supporting-document upload -->
 <div class="card" style="margin-bottom:24px;">
     <div class="section-header">
@@ -107,14 +100,6 @@
 
     <form id="upload-form" method="POST" action="/upload" enctype="multipart/form-data">
 
-        <div class="form-group full" style="margin-bottom:16px;">
-            <label>Contractor Name</label>
-            <input type="text" name="contractor_name" list="contractor-list"
-                   placeholder="Auto-filled from the WH-347 if left blank"
-                   style="max-width:420px;">
-            <span class="form-hint">Used to group any supporting documents uploaded with this audit.</span>
-        </div>
-
         <div class="form-group full" style="margin-bottom: 10px;">
             <div class="drop-zone" id="drop-zone" onclick="document.getElementById('pdf-input').click()">
                 <div class="drop-zone-icon">&#128196;</div>
@@ -125,33 +110,6 @@
             <input type="file" id="pdf-input" name="pdf" accept=".pdf" style="display:none" required>
         </div>
 
-        <div class="mini-supp-row">
-            <div class="mini-supp-box" id="supp-zone-fringe"
-                 onclick="document.getElementById('fringe-plan-input').click()">
-                <div class="mini-supp-icon">&#128196;</div>
-                <div class="mini-supp-label">Fringe Benefit Plan</div>
-                <div class="mini-supp-hint">optional · drag or click</div>
-                <div class="mini-supp-name" id="supp-name-fringe"></div>
-            </div>
-            <div class="mini-supp-box" id="supp-zone-apprentice"
-                 onclick="document.getElementById('apprentice-input').click()">
-                <div class="mini-supp-icon">&#128196;</div>
-                <div class="mini-supp-label">Apprentice Registration</div>
-                <div class="mini-supp-hint">optional · drag or click</div>
-                <div class="mini-supp-name" id="supp-name-apprentice"></div>
-            </div>
-            <div class="mini-supp-box" id="supp-zone-deduction"
-                 onclick="document.getElementById('deduction-input').click()">
-                <div class="mini-supp-icon">&#128196;</div>
-                <div class="mini-supp-label">Wage Deductions / Court Docs</div>
-                <div class="mini-supp-hint">optional · drag or click</div>
-                <div class="mini-supp-name" id="supp-name-deduction"></div>
-            </div>
-        </div>
-        <input type="file" id="fringe-plan-input" name="fringe_plan_pdf"    accept=".pdf" style="display:none">
-        <input type="file" id="apprentice-input"  name="apprentice_pdf"     accept=".pdf" style="display:none">
-        <input type="file" id="deduction-input"   name="wage_deduction_pdf" accept=".pdf" style="display:none">
-
         <div style="margin-top:20px;">
             <button type="submit" class="btn btn-primary" id="submit-btn">&#9654; Run Audit</button>
             <span id="loading-msg" style="display:none;margin-left:14px;font-size:13px;color:var(--muted);">
@@ -159,93 +117,6 @@
             </span>
         </div>
     </form>
-</div>
-
-<!-- ③ Contractor document library -->
-<div class="card">
-    <div class="section-header">
-        <div>
-            <div class="section-title">Supporting Documents by Contractor</div>
-            <div class="section-subtitle">Fringe plans, apprentice registrations, and wage deduction forms</div>
-        </div>
-    </div>
-
-    {% if contractors %}
-        {% for contractor_name, doc_groups in contractors.items() %}
-        {% set cid = loop.index %}
-        <div class="contractor-block">
-
-            <!-- Contractor header: name + rename / delete-all -->
-            <div class="contractor-header">
-                <div class="contractor-name" id="cname-{{ cid }}">{{ contractor_name }}</div>
-                <div class="contractor-actions">
-                    <button class="btn btn-secondary btn-sm"
-                            onclick="toggleRename({{ cid }})">Rename</button>
-                    <form method="POST" action="/contractors/delete" style="display:inline;"
-                          onsubmit="return confirm('Delete ALL documents for \'{{ contractor_name }}\'? This cannot be undone.')">
-                        <input type="hidden" name="contractor_name" value="{{ contractor_name }}">
-                        <button type="submit" class="btn btn-danger btn-sm">Delete All</button>
-                    </form>
-                </div>
-            </div>
-
-            <!-- Inline rename form (hidden by default) -->
-            <div id="rename-form-{{ cid }}" class="rename-row" style="display:none;">
-                <form method="POST" action="/contractors/rename"
-                      style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-                    <input type="hidden" name="old_name" value="{{ contractor_name }}">
-                    <input type="text"   name="new_name" value="{{ contractor_name }}"
-                           class="rename-input" list="contractor-list">
-                    <button type="submit" class="btn btn-primary btn-sm">Save</button>
-                    <button type="button" class="btn btn-secondary btn-sm"
-                            onclick="toggleRename({{ cid }})">Cancel</button>
-                </form>
-            </div>
-
-            <!-- 3-column doc slots -->
-            <div class="doc-slots">
-
-                {% set slot_defs = [
-                    ('Fringe Benefit Plan',        'fringe_plan'),
-                    ('Apprentice Registration',    'apprentice'),
-                    ('Wage Deductions / Court Docs','wage_deduction'),
-                ] %}
-                {% for label, key in slot_defs %}
-                <div class="doc-slot">
-                    <div class="doc-slot-label">{{ label }}</div>
-                    {% set docs = doc_groups[key] %}
-                    {% if docs %}
-                        {% for doc in docs %}
-                        <div class="doc-file">
-                            <span class="doc-file-name">{{ doc.original_name }}</span>
-                            <span class="doc-file-date">{{ doc.uploaded_at }}</span>
-                            <div class="doc-actions">
-                                <a href="/docs/{{ doc.id }}/view"
-                                   class="btn btn-secondary btn-sm" target="_blank">View</a>
-                                <form method="POST" action="/docs/{{ doc.id }}/delete"
-                                      style="display:inline;"
-                                      onsubmit="return confirm('Delete this document?')">
-                                    <button type="submit" class="btn btn-danger btn-sm">Delete</button>
-                                </form>
-                            </div>
-                        </div>
-                        {% endfor %}
-                    {% else %}
-                        <div class="doc-empty">No document uploaded</div>
-                    {% endif %}
-                </div>
-                {% endfor %}
-
-            </div>
-        </div>
-        {% endfor %}
-    {% else %}
-    <div class="empty-state">
-        <div style="font-size:40px;margin-bottom:12px;">&#128194;</div>
-        <strong>No documents yet</strong>
-        <p>Use the forms above to upload supporting documents or run a WH-347 audit.</p>
-    </div>
-    {% endif %}
 </div>
 
 {% endblock %}
@@ -303,11 +174,6 @@
     setupMiniBox('sd-zone-fringe',     'sd-fringe-input',    'sd-name-fringe');
     setupMiniBox('sd-zone-apprentice', 'sd-apprentice-input','sd-name-apprentice');
     setupMiniBox('sd-zone-deduction',  'sd-deduction-input', 'sd-name-deduction');
-
-    /* Audit upload boxes */
-    setupMiniBox('supp-zone-fringe',     'fringe-plan-input', 'supp-name-fringe');
-    setupMiniBox('supp-zone-apprentice', 'apprentice-input',  'supp-name-apprentice');
-    setupMiniBox('supp-zone-deduction',  'deduction-input',   'supp-name-deduction');
 
     /* ---- Standalone upload: contractor dropdown + create ---- */
     const sdSelect      = document.getElementById('sd-contractor-select');
@@ -373,10 +239,6 @@
         document.getElementById('sd-create-msg').textContent = '';
     }
 
-    /* ---- Contractor rename toggle ---- */
-    function toggleRename(cid) {
-        const form = document.getElementById('rename-form-' + cid);
-        form.style.display = form.style.display === 'none' ? 'block' : 'none';
-    }
+
 </script>
 {% endblock %}
