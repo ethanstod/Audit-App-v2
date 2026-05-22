@@ -9,6 +9,8 @@ import threading
 import subprocess
 import tempfile
 import json
+from collections import defaultdict
+from difflib import get_close_matches
 from datetime import datetime
 from urllib.request import urlopen, urlretrieve, Request as URLRequest
 from urllib.error import URLError
@@ -352,7 +354,6 @@ def index():
     ).fetchall()
     conn.close()
 
-    from collections import defaultdict
     contractors = {name: {"fringe_plan": [], "apprentice": [], "wage_deduction": []}
                    for name in contractor_names}
     for doc in docs:
@@ -373,15 +374,6 @@ def index():
                            contractor_names=contractor_names)
 
 
-def _accept_supp_pdf(field_name):
-    """Save a supplementary PDF temporarily. Returns (tmp_path, original_filename)."""
-    f = request.files.get(field_name)
-    if f and f.filename and f.filename.lower().endswith(".pdf"):
-        tmp_path = os.path.join(UPLOAD_DIR, f"tmp_{uuid.uuid4().hex[:8]}.pdf")
-        f.save(tmp_path)
-        return tmp_path, f.filename
-    return None, ""
-
 
 @app.route("/upload", methods=["POST"])
 def upload():
@@ -395,6 +387,9 @@ def upload():
         return redirect(url_for("index"))
     if not file.filename.lower().endswith(".pdf"):
         flash("Only PDF files are accepted.", "error")
+        return redirect(url_for("index"))
+    if request.content_length and request.content_length > 50 * 1024 * 1024:
+        flash("File too large. Maximum upload size is 50 MB.", "error")
         return redirect(url_for("index"))
 
     # Save WH-347 PDF
@@ -424,7 +419,6 @@ def upload():
     # Fuzzy-match PDF name against registered contractors to handle slight variations
     # (e.g. "Smith Construction LLC" → "Smith Construction" if that's registered)
     if contractor_name != "Unknown":
-        from difflib import get_close_matches
         all_names = [r["name"] for r in conn.execute("SELECT name FROM contractors").fetchall()]
         matches = get_close_matches(contractor_name, all_names, n=1, cutoff=0.75)
         if matches:
@@ -489,21 +483,18 @@ def view_report(audit_id):
         "SELECT * FROM audits WHERE id = ?", (audit_id,)
     ).fetchone()
 
-    contractor_docs = []
-    if audit and audit["contractor_name"]:
-        contractor_docs = conn.execute(
-            "SELECT * FROM contractor_docs WHERE contractor_name = ? "
-            "ORDER BY doc_type, uploaded_at DESC",
-            (audit["contractor_name"],)
-        ).fetchall()
-    conn.close()
-
     if not audit:
+        conn.close()
         flash("Audit not found.", "error")
         return redirect(url_for("index"))
 
-    # Group docs by type for display
-    from collections import defaultdict
+    contractor_docs = conn.execute(
+        "SELECT * FROM contractor_docs WHERE contractor_name = ? "
+        "ORDER BY doc_type, uploaded_at DESC",
+        (audit["contractor_name"],)
+    ).fetchall()
+    conn.close()
+
     docs_by_type = defaultdict(list)
     for doc in contractor_docs:
         docs_by_type[doc["doc_type"]].append(doc)

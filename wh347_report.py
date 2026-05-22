@@ -379,7 +379,7 @@ def _section_supporting_docs(supp_docs):
 
     return f"""
     <section>
-        <h2>7. Supporting Documents</h2>
+        <h2>7. Supporting Documents on File</h2>
         <p style="font-size:12px;color:#666;margin-bottom:12px;">
             Supporting documents are logged for the audit record.
             Automated parsing and cross-validation of these documents
@@ -407,7 +407,7 @@ def _section_regulation_reference():
     )
     return f"""
     <section>
-        <h2>6. Regulatory Reference</h2>
+        <h2>6. Regulatory Reference Table</h2>
         <table>
             <tr><th>Citation</th><th>Description</th></tr>
             {rows}
@@ -457,8 +457,8 @@ def generate_wh347_html_report(report_data, output_path=None):
     sec3 = _section_worker_detail(workers, audit_results_list)
     sec4 = _section_violations(audit_results_list)
     sec5 = _section_apprentice_ratios(report_data.get("apprentice"))
-    sec6 = _section_supporting_docs(report_data.get("supp_docs"))
-    sec7 = _section_regulation_reference()
+    sec6 = _section_regulation_reference()
+    sec7 = _section_supporting_docs(report_data.get("supp_docs"))
 
     overall_color = "#28a745" if overall_pass else "#dc3545"
     overall_label = "PASS" if overall_pass else "FAIL"

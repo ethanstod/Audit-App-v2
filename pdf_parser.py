@@ -194,8 +194,8 @@ _WORKER_COL_RANGES = {
     'j_ra':             (228,  260),
     'classification':   (260,  341),
     'ot_hours_sub':     (395,  435),  # OT sub-row hours
-    'dt_hours_sub':     (435,  465),  # DT sub-row hours (if present)
-    'total_hours':      (430,  465),
+    'dt_hours_sub':     (450,  480),  # DT sub-row hours (if present)
+    'total_hours':      (430,  450),  # total hours (non-overlapping with dt_hours_sub)
     'st_rate':          (462,  503),
     'fringe_credit':    (503,  535),
     'gross':            (597,  637),
@@ -205,8 +205,7 @@ _WORKER_COL_RANGES = {
     'net':              (727,  800),
 }
 
-# Tighter mapping: total_hours and dt_hours_sub overlap — resolve by y-band context
-_TOTAL_HOURS_RANGE = (430, 465)
+_TOTAL_HOURS_RANGE = (430, 450)
 
 
 def _x_to_col(x0):
